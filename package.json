@@ -7,11 +7,11 @@
     "build": "lucid-package bundle --out dist/csa-lucid-bundle.zip"
   },
   "dependencies": {
-    "@lucidsoftware/extension-sdk": "^0.12.0",
+    "lucid-extension-sdk": "^1.1.0",
     "elkjs": "^0.9.3"
   },
   "devDependencies": {
-    "lucid-package": "^0.12.0",
+    "lucid-package": "^0.0.145",
     "typescript": "^5.4.0"
   }
 }

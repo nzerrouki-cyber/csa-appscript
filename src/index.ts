@@ -1,4 +1,4 @@
-import { EditorClient } from '@lucidsoftware/extension-sdk';
+import { EditorClient } from 'lucid-extension-sdk';
 import ELK from 'elkjs/lib/elk.bundled.js';
 
 const client = new EditorClient();
