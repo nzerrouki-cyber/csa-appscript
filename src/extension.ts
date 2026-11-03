@@ -4,7 +4,6 @@ import ELK from 'elkjs/lib/elk.bundled.js';
 const client = new EditorClient();
 const elk = new ELK();
 
-// Map node types/labels to native Lucid GCP 2021 shape identifiers
 function mapNodeToGcpShape(node: any): string {
   const text = (node.text || '').toLowerCase();
   const type = (node.type || '').toLowerCase();
@@ -28,12 +27,10 @@ function mapNodeToGcpShape(node: any): string {
     return 'gcp-cloud-run';
   }
 
-  // Default standard compute stencil
   return 'gcp-compute-engine';
 }
 
 client.registerStartupHook(async () => {
-  // 1. Consume the raw JSON graph attached by Apps Script
   const bootstrap = await client.processAndClearBootstrapData();
   if (!bootstrap?.data?.csaPayload) {
     return;
@@ -50,7 +47,6 @@ client.registerStartupHook(async () => {
   const viewport = client.getViewport();
   const pages = viewport.getPages();
 
-  // 2. Render each diagram page
   for (const page of pages) {
     const title = page.getTitle() || '';
     let graphData: any = null;
@@ -71,7 +67,6 @@ client.registerStartupHook(async () => {
 
     if (!graphData || !graphData.nodes) continue;
 
-    // 3. Format graph for ELK
     const elkGraph = {
       id: 'root',
       layoutOptions: {
@@ -94,11 +89,9 @@ client.registerStartupHook(async () => {
       }))
     };
 
-    // 4. Calculate layout in browser
     const layout = await elk.layout(elkGraph);
     if (!layout.children) continue;
 
-    // 5. Stamp GCP 2021 blocks
     const shapeIdMap = new Map<string, any>();
 
     for (const n of layout.children) {
@@ -123,7 +116,6 @@ client.registerStartupHook(async () => {
       shapeIdMap.set(n.id, block);
     }
 
-    // 6. Connect lines with orthogonal routing
     for (const e of graphData.edges || []) {
       const srcId = String(e.sourceId || e.endpoint1?.shapeId);
       const tgtId = String(e.targetId || e.endpoint2?.shapeId);

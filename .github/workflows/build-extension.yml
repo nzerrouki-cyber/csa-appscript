@@ -15,10 +15,15 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Dependencies
+      - name: Install Root Dependencies
         run: npm install
 
-      # Writes package.zip in the repo root (lucid-package has no output flag)
+      - name: Install Extension Dependencies
+        run: |
+          cd editorextensions/csa-elk-renderer
+          npm install
+
+      # Compiles editorextensions and outputs package.zip at root
       - name: Bundle Extension Package
         run: npx lucid-package bundle
 
@@ -27,3 +32,4 @@ jobs:
         with:
           name: csa-bundle
           path: package.zip
+          if-no-files-found: error

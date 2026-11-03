@@ -3,9 +3,13 @@
   "name": "Costco CSA Diagram Engine",
   "version": "1.0.0",
   "description": "Renders CSA slides directly into Lucidchart using ELK layout and GCP 2021 shapes",
-  "entry": "src/extension.ts",
-  "permissions": [
-    "document.read",
-    "document.write"
+  "editorExtensions": [
+    {
+      "name": "csa-elk-renderer",
+      "title": "CSA ELK Renderer",
+      "products": ["chart"],
+      "codePath": "bin/extension.js",
+      "scopes": ["READ", "WRITE"]
+    }
   ]
 }
