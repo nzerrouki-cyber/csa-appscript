@@ -80,55 +80,50 @@ function doGet(e) {
   );
 }
 
+
 function pushPayloadToLucid(architectureData) {
-  const token = PropertiesService.getUserProperties().getProperty('LUCID_ACCESS_TOKEN'); //[cite: 6]
-  if (!token) throw new Error('Not authenticated. Please authorize Lucidchart first.'); //[cite: 6]
+  const token = PropertiesService.getUserProperties().getProperty('LUCID_ACCESS_TOKEN');
+  if (!token) throw new Error('Not authenticated. Please authorize Lucidchart first.');
 
-  const projectTitle = architectureData.title ? `CSA - ${architectureData.title}` : 'CSA - Initiative Architecture'; //[cite: 6]
+  const packageId = PropertiesService.getScriptProperties().getProperty('LUCID_PACKAGE_ID');
+  if (!packageId) throw new Error('Script property LUCID_PACKAGE_ID is not set.');
 
-  // Create skeleton pages for the architecture document
+  const bootstrap = buildBootstrapPayload(architectureData);
+
   const documentJson = {
-    "version": 1, //[cite: 6]
-    "pages": [
-      { "id": "page_system_context", "title": "Slide 6: System Context" },
-      { "id": "page_decomp_current", "title": "Slide 7: Current State" },
-      { "id": "page_decomp_interim", "title": "Slide 8: Interim State" },
-      { "id": "page_decomp_target", "title": "Slide 9: Target State" },
-      { "id": "page_deployment", "title": "Slide 10: System Deployment" },
-      { "id": "page_infoflow", "title": "Slide 11: Information Flow" }
-    ],
-    // Pass the raw, un-laid-out architecture data directly to your extension
+    "version": 1,
+    "pages": bootstrap.diagrams.map(d => ({ "id": d.key, "title": d.pageTitle })),
     "extensionBootstrapData": {
-      "packageId": "YOUR-LUCID-PACKAGE-UUID-HERE",
+      "packageId": packageId,
       "extensionName": "csa-elk-renderer",
       "minimumVersion": "1.0.0",
       "data": {
-        "csaPayload": JSON.stringify(architectureData)
+        "csaPayload": JSON.stringify(bootstrap)
       }
     }
   };
 
-  const jsonBlob = Utilities.newBlob(JSON.stringify(documentJson), 'application/json', 'document.json'); //[cite: 6]
-  const zipBlob = Utilities.zip([jsonBlob], 'import.lucid') //[cite: 6]
-    .setContentType('x-application/vnd.lucid.standardImport'); //[cite: 6]
+  const jsonBlob = Utilities.newBlob(JSON.stringify(documentJson), 'application/json', 'document.json');
+  const zipBlob = Utilities.zip([jsonBlob], 'import.lucid')
+    .setContentType('x-application/vnd.lucid.standardImport');
 
-  const response = UrlFetchApp.fetch('https://api.lucid.co/v1/documents', { //[cite: 6]
-    method: 'post', //[cite: 6]
-    headers: { 
-      'Authorization': `Bearer ${token}`, //[cite: 6]
-      'Lucid-Api-Version': '1'  //[cite: 6]
+  const response = UrlFetchApp.fetch('https://api.lucid.co/v1/documents', {
+    method: 'post',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Lucid-Api-Version': '1'
     },
     payload: {
-      "product": "lucidchart", //[cite: 6]
-      "title": projectTitle, //[cite: 6]
-      "file": zipBlob //[cite: 6]
+      "product": "lucidchart",
+      "title": bootstrap.title,
+      "file": zipBlob
     },
-    muteHttpExceptions: true //[cite: 6]
+    muteHttpExceptions: true
   });
 
-  if (response.getResponseCode() >= 400) { //[cite: 6]
-    throw new Error(`API Error ${response.getResponseCode()}: ${response.getContentText()}`); //[cite: 6]
+  if (response.getResponseCode() >= 400) {
+    throw new Error(`API Error ${response.getResponseCode()}: ${response.getContentText()}`);
   }
 
-  return JSON.parse(response.getContentText()); //[cite: 6]
+  return JSON.parse(response.getContentText());
 }
