@@ -8,7 +8,7 @@
       "name": "csa-elk-renderer",
       "title": "CSA ELK Renderer",
       "products": ["chart"],
-      "codePath": "bin/extension.js",
+      "codePath": "editorextensions/csa-elk-renderer/bin/extension.js",
       "scopes": ["READ", "WRITE"]
     }
   ]
