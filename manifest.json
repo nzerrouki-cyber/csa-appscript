@@ -1,5 +1,4 @@
 {
-  "id": "YOUR_LUCID_PACKAGE_UUID_HERE",
   "name": "Costco CSA Diagram Engine",
   "version": "1.0.0",
   "description": "Renders CSA slides directly into Lucidchart using ELK layout and GCP 2021 shapes",
