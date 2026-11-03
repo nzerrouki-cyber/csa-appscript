@@ -1,11 +1,17 @@
 {
   "name": "costco-csa-lucid-extension",
   "version": "1.0.0",
+  "description": "Lucidchart extension for rendering CSA diagrams via ELK layout and native GCP 2021 shapes",
+  "main": "src/extension.ts",
+  "scripts": {
+    "build": "lucid-package bundle --out dist/csa-lucid-bundle.zip"
+  },
   "dependencies": {
     "@lucidsoftware/extension-sdk": "^0.12.0",
     "elkjs": "^0.9.3"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "lucid-package": "^0.12.0",
+    "typescript": "^5.4.0"
   }
 }
