@@ -1,0 +1,20 @@
+name: Build CSA Extension Bundle
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      # Bundles index.ts and elk.bundled.js into a single artifact
+      - run: npx lucid-package bundle --out dist/csa-lucid-bundle.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: csa-bundle
+          path: dist/csa-lucid-bundle.zip
