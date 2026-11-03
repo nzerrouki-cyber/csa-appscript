@@ -4,7 +4,7 @@
   "description": "Lucidchart extension for rendering CSA diagrams via ELK layout and native GCP 2021 shapes",
   "main": "src/extension.ts",
   "scripts": {
-    "build": "lucid-package bundle --out dist/csa-lucid-bundle.zip"
+    "build": "lucid-package bundle"
   },
   "dependencies": {
     "lucid-extension-sdk": "^1.1.0",

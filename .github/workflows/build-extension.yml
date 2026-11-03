@@ -18,12 +18,12 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      # Bundles extension code and elk.bundled.js into dist/csa-lucid-bundle.zip
+      # Writes package.zip in the repo root (lucid-package has no output flag)
       - name: Bundle Extension Package
-        run: npx lucid-package bundle --out dist/csa-lucid-bundle.zip
+        run: npx lucid-package bundle
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: csa-bundle
-          path: dist/csa-lucid-bundle.zip
+          path: package.zip
