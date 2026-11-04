@@ -2,6 +2,27 @@ import { BlockProxy, DocumentProxy, EditorClient, PageProxy } from 'lucid-extens
 import ELK from 'elkjs/lib/elk.bundled.js';
 
 const client = new EditorClient();
+
+// The Lucid extension sandbox has no timers, but ELK's in-process worker and its GWT runtime call
+// setTimeout/clearTimeout. Delays are only used to defer work, so a microtask queue is enough.
+(function installTimerShim() {
+  const g: any = globalThis as any;
+  if (typeof g.setTimeout === 'function') return;
+  let nextId = 1;
+  const cancelled = new Set<number>();
+  g.setTimeout = (fn: any, _ms?: number, ...args: any[]) => {
+    const id = nextId++;
+    Promise.resolve().then(() => {
+      if (cancelled.delete(id)) return;
+      if (typeof fn === 'function') fn(...args);
+    });
+    return id;
+  };
+  g.clearTimeout = (id: number) => {
+    if (typeof id === 'number') cancelled.add(id);
+  };
+})();
+
 const elk = new ELK();
 
 const SCHEMA_VERSION = 2;
@@ -18,6 +39,7 @@ interface GraphNode {
   category: string;
   deltaFlag: string;
   isSoR: boolean;
+  isCore?: boolean;
 }
 
 interface GraphEdge {
@@ -26,6 +48,7 @@ interface GraphEdge {
   targetId: string;
   label: string;
   bidirectional: boolean;
+  stepNumbers?: number[];
 }
 
 interface Diagram {
@@ -156,8 +179,43 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   return { ...diagram, nodes, edges };
 }
 
+// Shape key from the CSA reference template slides: every element is a plain Lucid shape coloured by its role.
+interface Swatch {
+  fill: string;
+  line: string;
+  legend: string;
+}
+
+const KEY: { [role: string]: Swatch } = {
+  tool: { fill: '#EAF2FF', line: '#6FA8F5', legend: 'Tool' },
+  externalTool: { fill: '#F3F4F6', line: '#6B7280', legend: 'External Tool' },
+  dataStore: { fill: '#FFF2CC', line: '#F2C14E', legend: 'Data Store' },
+  system: { fill: '#C9F2C7', line: '#5CB85C', legend: 'Enterprise System' },
+  capability: { fill: '#FFF2CC', line: '#F2C14E', legend: 'Business Capability' },
+  contextCapability: { fill: '#F3F4F6', line: '#9CA3AF', legend: 'Business Capability' },
+  location: { fill: '#F2D9FA', line: '#D58CEB', legend: 'Location' },
+  environment: { fill: '#FDE2E2', line: '#F08080', legend: 'Deployment Environment' },
+  host: { fill: '#EAF2FF', line: '#6FA8F5', legend: 'Host' },
+  perimeter: { fill: '#FFFFFF', line: '#9CA3AF', legend: 'External Boundary' },
+  unknown: { fill: '#FFFFFF', line: '#D0021B', legend: 'Unknown Type' }
+};
+
+const RED = '#D0021B';
+const RETIRING_LINE = '#9CA3AF';
+const TRANSPARENT = '#FFFFFF00';
+
+// Lucid classes to try, best first; FALLBACK_CLASS is always tried last.
+const RECT_CLASSES = [FALLBACK_CLASS];
+const CIRCLE_CLASSES = ['CircleBlock', 'ConnectorBlock', 'TerminatorBlock'];
+const DATASTORE_CLASSES = ['DatabaseBlock', 'StoredDataBlock'];
+const ELLIPSE_CLASSES = ['CircleBlock', 'ConnectorBlock', 'TerminatorBlock'];
+
+// A small GCP 2021 icon in the corner of a tool. The tool shape itself always follows the key.
+const SHOW_GCP_BADGES = true;
+const BADGE_SIZE = 32;
+
 // Class names from https://developer.lucid.co/docs/gcp-2021-library, keyed by normalizeTool().
-// To support a new tool, add its normalized name here (see the "missing from GCP_CLASS_MAP" log).
+// To support a new tool, add its normalized name here (see the "no GCP 2021 icon mapping" issue).
 const GCP_CLASS_MAP: { [tool: string]: string } = {
   cloudrun: 'GCP2021CloudRunIcon',
   kubernetesengine: 'GCP2021GoogleKubernetesEngineIcon',
@@ -194,76 +252,107 @@ function toolName(node: GraphNode): string {
   return node.technology || node.label;
 }
 
+// technology is often generic ("Google Cloud Platform"), so the label is tried when it has no mapping.
 function resolveGcpClass(node: GraphNode): string | null {
-  return GCP_CLASS_MAP[normalizeTool(toolName(node))] || null;
+  return GCP_CLASS_MAP[normalizeTool(toolName(node))] || GCP_CLASS_MAP[normalizeTool(node.label.split('\n')[0])] || null;
 }
 
 function looksLikeGcp(node: GraphNode): boolean {
   return /^(gcp|google)\b/i.test(toolName(node).trim());
 }
 
-const C = {
-  user: 'GCP2021ContainerUser1',
-  system: 'GCP2021ContainerSystem1',
-  capability: 'GCP2021ContainerLogicalGroupingOfServicesInstances',
-  cloudProvider: 'GCP2021ContainerProjectZoneCloudServiceProvider',
-  onPrem: 'GCP2021ContainerColoDCOnPremises',
-  infrastructure: 'GCP2021ContainerInfrastructureSystem2',
-  region: 'GCP2021ContainerRegion',
-  zone: 'GCP2021ContainerZone',
-  subnet: 'GCP2021ContainerSubNetwork',
-  saas: 'GCP2021ContainerExternalSaaSProviders',
-  dataSource: 'GCP2021ContainerExternalDataSources'
-};
+function firstLine(node: GraphNode): string {
+  return String(node.label || node.id).split('\n')[0];
+}
 
-// Group shapes for containers, chosen by the container's kind (from the payload "type") and label.
-function containerClassFor(node: GraphNode): string {
-  const label = node.label.toLowerCase();
-  switch (node.kind) {
-    case 'enterprise_system':
-    case 'system':
-      return C.system;
-    case 'business_capability':
-    case 'capability':
-      return C.capability;
-    case 'macro_env':
-    case 'macro_environment':
-      if (/on-?prem|colo|data\s*cent|\bdc\b/.test(label)) return C.onPrem;
-      if (/gcp|google|cloud|aws|azure/.test(label)) return C.cloudProvider;
-      return C.infrastructure;
-    case 'location':
-      if (/on-?prem|colo|data\s*cent|\bdc\b/.test(label)) return C.onPrem;
-      if (/sub-?net/.test(label)) return C.subnet;
-      if (/zone/.test(label)) return C.zone;
-      return C.region;
-    case 'host':
-      return C.infrastructure;
-    case 'perimeter':
-      return C.saas;
-    default:
-      console.warn('Unknown container type "' + node.kind + '" for ' + node.id + '; drawn as a capability group.');
-      return C.capability;
+function isDataStore(node: GraphNode): boolean {
+  return node.isSoR || /database|\bdb\b|datastore|data\s*store|data\s*lake|\bcache\b/i.test(node.label + ' ' + (node.technology || ''));
+}
+
+function roleFor(node: GraphNode, archetype: string): string {
+  if (node.isContainer) {
+    switch (node.kind) {
+      case 'system':
+      case 'enterprise_system':
+        return 'system';
+      case 'capability':
+      case 'business_capability':
+        return archetype === 'CONTEXT' ? 'contextCapability' : 'capability';
+      case 'macro_env':
+      case 'macro_environment':
+        return 'environment';
+      case 'location':
+        return 'location';
+      case 'host':
+        return 'host';
+      case 'perimeter':
+        return 'perimeter';
+      default:
+        return 'unknown';
+    }
   }
+  if (isDataStore(node)) return 'dataStore';
+  if (node.category === 'external') return 'externalTool';
+  return 'tool';
 }
 
-// Shape for a tool with no GCP icon, so it still reads as the right kind of element.
-function inferToolClass(node: GraphNode): string {
-  const label = toolName(node).toLowerCase();
-  if (node.isSoR || /database|\bdb\b|datastore|data\s*store|warehouse|data\s*lake/.test(label)) return C.dataSource;
-  if (node.category === 'external' || /saas|third.?party|vendor/.test(label)) return C.saas;
-  if (/\b(user|client|mobile|member|customer|browser|associate)s?\b/.test(label)) return C.user;
-  return C.system;
+function shapeClassesFor(node: GraphNode, role: string, archetype: string): string[] {
+  if (node.isContainer) return RECT_CLASSES;
+  if (archetype === 'CONTEXT') return CIRCLE_CLASSES;
+  if (role === 'dataStore') return DATASTORE_CLASSES;
+  return RECT_CLASSES;
 }
 
-function nodeSize(node: GraphNode): { w: number; h: number } {
-  const lines = String(node.label || '').split('\n');
-  const longest = Math.max(0, ...lines.map(l => l.length));
-  return {
-    w: Math.min(260, Math.max(140, longest * 7 + 40)),
-    h: Math.max(100, lines.length * 18 + 70)
-  };
+// Red Circle Rule: Adding/Changing tools get a red ellipse drawn around them. "Retired" must not match.
+function isRedCircle(node: GraphNode): boolean {
+  return !node.isContainer && /^\s*(add|chang|red\b)/i.test(node.deltaFlag || '');
 }
 
+function isRetiring(node: GraphNode): boolean {
+  return !node.isContainer && /^\s*retir/i.test(node.deltaFlag || '');
+}
+
+// An ellipse scaled by sqrt(2) passes through the corners of the box it surrounds.
+const ELLIPSE_SCALE = 1.42;
+
+function ellipseMargin(w: number, h: number): { mx: number; my: number } {
+  return { mx: Math.ceil(((ELLIPSE_SCALE - 1) * w) / 2) + 4, my: Math.ceil(((ELLIPSE_SCALE - 1) * h) / 2) + 4 };
+}
+
+const CHAR_W = 7;
+const LINE_H = 18;
+
+function wrappedLines(label: string, width: number): number {
+  const usable = Math.max(40, width - 30);
+  return String(label || '').split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((line.length * CHAR_W) / usable)), 0);
+}
+
+function longestLine(label: string): number {
+  return Math.max(0, ...String(label || '').split('\n').map(l => l.length));
+}
+
+function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
+  const longest = longestLine(node.label);
+  if (node.isContainer) {
+    const w = Math.min(320, Math.max(220, longest * CHAR_W + 40));
+    return { w, h: Math.max(90, wrappedLines(node.label, w) * LINE_H + 50) };
+  }
+  if (archetype === 'CONTEXT') {
+    const d = Math.min(220, Math.max(140, longest * 5 + 70));
+    return { w: d, h: d };
+  }
+  const w = Math.min(240, Math.max(150, longest * CHAR_W + 30));
+  return { w, h: Math.max(80, wrappedLines(node.label, w) * LINE_H + 44) };
+}
+
+// Containers that hold children get their title in a strip along the top edge.
+function headerMinWidth(label: string): number {
+  return Math.min(480, Math.max(220, longestLine(label) * CHAR_W + 48));
+}
+
+function headerHeight(label: string, width: number): number {
+  return Math.max(40, wrappedLines(label, width) * LINE_H + 16);
+}
 function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
   const hasContainers = diagram.nodes.some(n => n.isContainer);
   const options: { [key: string]: string } = {
@@ -272,7 +361,8 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     'elk.edgeRouting': 'ORTHOGONAL',
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
     'elk.spacing.nodeNode': '50',
-    'elk.layered.spacing.nodeNodeBetweenLayers': '100'
+    // Wide enough for Lucid's connector labels, which ELK does not size.
+    'elk.layered.spacing.nodeNodeBetweenLayers': '140'
   };
 
   if (diagram.archetype === 'CONTEXT' && !hasContainers) {
@@ -280,6 +370,10 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
   }
   if (diagram.archetype === 'DEPLOYMENT') {
     options['elk.direction'] = 'DOWN';
+  }
+  if (diagram.archetype === 'INFO_FLOW') {
+    // Keep the payload's step order where the layering allows it.
+    options['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
   }
   return options;
 }
@@ -294,18 +388,26 @@ function buildElkGraph(diagram: Diagram): any {
 
   const toElk = (node: GraphNode): any => {
     const kids = childrenByParent.get(node.id) || [];
-    const elkNode: any = { id: node.id, labels: [{ text: node.label }] };
+    const elkNode: any = { id: node.id };
 
     if (kids.length > 0) {
-      elkNode.layoutOptions = { 'elk.padding': '[top=56,left=32,bottom=32,right=32]' };
+      const minW = headerMinWidth(node.label);
+      const top = headerHeight(node.label, minW) + 16;
+      elkNode.layoutOptions = {
+        'elk.padding': '[top=' + top + ',left=32,bottom=32,right=32]',
+        'elk.nodeSize.constraints': 'MINIMUM_SIZE',
+        'elk.nodeSize.minimum': '(' + minW + ', ' + (top + 40) + ')'
+      };
       elkNode.children = kids.map(toElk);
-    } else if (node.isContainer) {
-      elkNode.width = 260;
-      elkNode.height = 140;
     } else {
-      const size = nodeSize(node);
+      const size = nodeSize(node, diagram.archetype);
       elkNode.width = size.w;
       elkNode.height = size.h;
+      if (isRedCircle(node)) {
+        // Reserve room for the red ellipse so it does not overlap neighbours.
+        const m = ellipseMargin(size.w, size.h);
+        elkNode.layoutOptions = { 'elk.margins': '[top=' + m.my + ',left=' + m.mx + ',bottom=' + m.my + ',right=' + m.mx + ']' };
+      }
     }
     return elkNode;
   };
@@ -316,6 +418,13 @@ function buildElkGraph(diagram: Diagram): any {
     children: (childrenByParent.get(null) || []).map(toElk),
     edges: diagram.edges.map(e => ({ id: e.id, sources: [e.sourceId], targets: [e.targetId] }))
   };
+}
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 interface Placed {
@@ -338,6 +447,21 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
     }
     flattenLayout(child, x, y, nodeById, out);
   }
+}
+
+function canvasBox(p: Placed): Box {
+  return { x: p.x + CANVAS_MARGIN, y: p.y + CANVAS_MARGIN, w: p.w, h: p.h };
+}
+
+// The area a shape really covers, including its red ellipse.
+function outerBox(p: Placed): Box {
+  if (!isRedCircle(p.node)) return { x: p.x, y: p.y, w: p.w, h: p.h };
+  const m = ellipseMargin(p.w, p.h);
+  return { x: p.x - m.mx, y: p.y - m.my, w: p.w + 2 * m.mx, h: p.h + 2 * m.my };
+}
+
+function fmtBox(b: Box): string {
+  return Math.round(b.x) + ',' + Math.round(b.y) + ' ' + Math.round(b.w) + 'x' + Math.round(b.h);
 }
 
 async function loadClasses(classNames: string[]): Promise<Set<string>> {
@@ -364,7 +488,8 @@ function trySet(label: string, fn: () => void): void {
 const LABEL_KEYS = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
 
 // set() on an unknown text area key does not throw, so each write is read back to confirm it took.
-function setLabel(block: BlockProxy, label: string): boolean {
+// Returns the text area that holds the label, or null.
+function setLabel(block: BlockProxy, label: string): string | null {
   let existing: string[] = [];
   try {
     existing = Array.from(block.textAreas.keys());
@@ -379,44 +504,156 @@ function setLabel(block: BlockProxy, label: string): boolean {
   for (const key of candidates) {
     try {
       block.textAreas.set(key, label);
-      if (String(block.textAreas.get(key) ?? '').replace(/\s+/g, '') === label.replace(/\s+/g, '')) return true;
+      if (String(block.textAreas.get(key) ?? '').replace(/\s+/g, '') === label.replace(/\s+/g, '')) return key;
     } catch {
       // try the next key
     }
   }
-  return false;
+  return null;
 }
 
-function createBlock(page: PageProxy, placed: Placed, className: string, issues: string[]): BlockProxy {
-  const isContainer = placed.node.isContainer;
-  const block = page.addBlock({
-    className,
-    boundingBox: { x: placed.x + CANVAS_MARGIN, y: placed.y + CANVAS_MARGIN, w: placed.w, h: placed.h },
-    ...(isContainer && className === FALLBACK_CLASS ? { fillStyle: '#f3f4f6' } : {})
+function setBold(block: BlockProxy, key: string): void {
+  try {
+    const styles = (block as any).textStyles;
+    if (styles && typeof styles.set === 'function') {
+      Promise.resolve(styles.set(key, { bold: true })).catch((err: unknown) => console.warn('Could not bold ' + key + ': ' + describeError(err)));
+    }
+  } catch (err) {
+    console.warn('Could not bold ' + key + ': ' + describeError(err));
+  }
+}
+
+// Text left in other areas is usually a shape's built-in placeholder ("Service Name", "Text", ...).
+function leftoverText(block: BlockProxy, keep: string | null): string[] {
+  const out: string[] = [];
+  try {
+    for (const key of Array.from(block.textAreas.keys())) {
+      if (key === keep) continue;
+      const value = String(block.textAreas.get(key) ?? '').trim();
+      if (value) out.push(key + '="' + (value.length > 40 ? value.substring(0, 40) + '...' : value) + '"');
+    }
+  } catch (err) {
+    console.warn('Could not read text areas: ' + describeError(err));
+  }
+  return out;
+}
+
+// Some classes force their own size or snap position, which breaks the ELK layout.
+function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: string[]): void {
+  let got: Box | undefined;
+  try {
+    got = (block as any).getBoundingBox();
+  } catch (err) {
+    console.warn('Could not read bounding box of ' + what + ': ' + describeError(err));
+    return;
+  }
+  if (!got) return;
+  const off = Math.max(Math.abs(got.x - want.x), Math.abs(got.y - want.y), Math.abs(got.w - want.w), Math.abs(got.h - want.h));
+  if (off > 2) {
+    issues.push(what + ' was placed at ' + fmtBox(got) + ' instead of ' + fmtBox(want) + '; the shape class may force its own size or position.');
+  }
+}
+interface ShapeSpec {
+  classes: string[];
+  box: Box;
+  fill: string;
+  line: string;
+  lineWidth: number;
+  dashed?: boolean;
+  rounding?: number;
+  text?: string;
+  bold?: boolean;
+}
+
+interface DrawContext {
+  issues: string[];
+  unavailable: Set<string>;
+  substitutions: Map<string, number>;
+  fillMismatches: string[];
+}
+
+function verifyFill(block: BlockProxy, fill: string, what: string, ctx: DrawContext): void {
+  try {
+    const actual = block.properties.get('FillColor');
+    if (typeof actual !== 'string') return;
+    const norm = (c: string) => c.toLowerCase().replace(/^#/, '').substring(0, 6);
+    if (norm(actual) !== norm(fill)) ctx.fillMismatches.push(what + ' is ' + actual + ' (wanted ' + fill + ')');
+  } catch {
+    // FillColor is not readable on every class
+  }
+}
+
+function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawContext): BlockProxy | null {
+  const candidates = spec.classes.filter(c => !ctx.unavailable.has(c));
+  if (candidates.indexOf(FALLBACK_CLASS) < 0) candidates.push(FALLBACK_CLASS);
+
+  let block: BlockProxy | null = null;
+  let used = '';
+  for (const className of candidates) {
+    try {
+      block = page.addBlock({ className, boundingBox: spec.box, fillStyle: spec.fill });
+      used = className;
+      break;
+    } catch (err) {
+      console.warn('addBlock failed for ' + what + ' with class ' + className + ': ' + describeError(err));
+      if (className !== FALLBACK_CLASS) ctx.unavailable.add(className);
+    }
+  }
+  if (!block) {
+    try {
+      block = page.addBlock({ className: FALLBACK_CLASS, boundingBox: spec.box });
+      used = FALLBACK_CLASS;
+      ctx.issues.push(what + ' was drawn without its key colour (fill ' + spec.fill + ' was rejected).');
+    } catch (err) {
+      ctx.issues.push(what + ' could not be drawn (' + shortError(err) + ').');
+      return null;
+    }
+  }
+  if (used !== spec.classes[0]) {
+    const key = spec.classes[0] + ' -> ' + used;
+    ctx.substitutions.set(key, (ctx.substitutions.get(key) || 0) + 1);
+  }
+
+  const b = block;
+  trySet('line style of ' + what, () => {
+    b.properties.set('LineColor', spec.line);
+    b.properties.set('LineWidth', spec.lineWidth);
   });
+  if (spec.dashed) trySet('dashed line of ' + what, () => b.properties.set('StrokeStyle', 'dashed'));
+  const rounding = spec.rounding || 0;
+  if (rounding > 0) trySet('rounding of ' + what, () => b.properties.set('Rounding', rounding));
+  verifyFill(b, spec.fill, what, ctx);
 
-  if (!setLabel(block, placed.node.label)) {
-    console.warn('[Renderer] Could not set text on shape ' + placed.node.id);
-    issues.push('Label not written on "' + placed.node.label + '" (' + className + '); the shape shows its default text.');
+  let labelKey: string | null = null;
+  if (spec.text !== undefined) {
+    labelKey = setLabel(b, spec.text);
+    if (labelKey === null) {
+      console.warn('[Renderer] Could not set text on ' + what);
+      ctx.issues.push('Label not written on ' + what + ' (' + used + '); the shape shows its default text.');
+    } else if (spec.bold) {
+      setBold(b, labelKey);
+    }
   }
+  const leftover = leftoverText(b, labelKey);
+  if (leftover.length > 0) ctx.issues.push(what + ' (' + used + ') still shows default text: ' + leftover.join(', ') + '.');
+  checkBlockBox(b, spec.box, what + ' (' + used + ')', ctx.issues);
+  return b;
+}
 
-  // Handle Adding/Changing (Red Border)
-  if (/add|chang|red/i.test(placed.node.deltaFlag)) {
-    trySet('delta border', () => {
-      block.properties.set('LineColor', '#D0021B');
-      block.properties.set('LineWidth', 3);
-    });
-  } 
-  // Handle Retiring (Dashed Gray Border)
-  else if (/retir/i.test(placed.node.deltaFlag)) {
-    trySet('retiring border', () => {
-      block.properties.set('LineColor', '#9CA3AF'); // Gray-400
-      block.properties.set('LineWidth', 2);
-      block.properties.set('StrokeStyle', 'dashed');
-    });
+function drawGcpBadge(page: PageProxy, className: string, tool: Box, label: string, issues: string[]): void {
+  const box = { x: tool.x + 6, y: tool.y + 6, w: BADGE_SIZE, h: BADGE_SIZE };
+  const what = 'GCP icon ' + className + ' on "' + label + '"';
+  try {
+    const icon = page.addBlock({ className, boundingBox: box });
+    for (const key of Array.from(icon.textAreas.keys())) {
+      trySet('icon text ' + key, () => icon.textAreas.set(key, ''));
+    }
+    const leftover = leftoverText(icon, null);
+    if (leftover.length > 0) issues.push(what + ' still shows default text: ' + leftover.join(', ') + '.');
+    checkBlockBox(icon, box, what, issues);
+  } catch (err) {
+    issues.push(what + ' could not be added (' + shortError(err) + ').');
   }
-  
-  return block;
 }
 
 // Attach each end to the border facing the other shape instead of the centre, so lines leave
@@ -469,8 +706,8 @@ function gridLayout(diagram: Diagram): any {
   const cols = Math.max(1, Math.ceil(Math.sqrt(diagram.nodes.length)));
   return {
     children: diagram.nodes.map((n, i) => {
-      const size = n.isContainer ? { w: 260, h: 140 } : nodeSize(n);
-      return { id: n.id, x: (i % cols) * 320, y: Math.floor(i / cols) * 200, width: size.w, height: size.h };
+      const size = nodeSize(n, diagram.archetype);
+      return { id: n.id, x: (i % cols) * 340, y: Math.floor(i / cols) * 260, width: size.w, height: size.h };
     })
   };
 }
@@ -480,102 +717,332 @@ function shortError(err: unknown): string {
   return first.length > 300 ? first.substring(0, 300) + '...' : first;
 }
 
-const KNOWN_CONTAINER_KINDS = ['system', 'enterprise_system', 'capability', 'business_capability', 'macro_env', 'macro_environment', 'location', 'host', 'perimeter'];
+function listSome(items: string[], max = 3): string {
+  return items.slice(0, max).join('; ') + (items.length > max ? '; ... (' + (items.length - max) + ' more)' : '');
+}
 
-// Checks the normalized graph against the CSA Diagram Standards so structural mistakes are reported on the page.
+const KNOWN_CONTAINER_KINDS = ['system', 'enterprise_system', 'capability', 'business_capability', 'macro_env', 'macro_environment', 'location', 'host', 'perimeter'];
+const DELTA_VALUES = ['neutral', 'adding', 'changing', 'retiring'];
+
+// Step numbers come from the normalizer; older payloads only carry them in "Step N: ..." labels.
+function stepsOf(edge: GraphEdge): number[] {
+  if (Array.isArray(edge.stepNumbers) && edge.stepNumbers.length > 0) return edge.stepNumbers;
+  const found: number[] = [];
+  String(edge.label || '').split('\n').forEach(l => {
+    const m = /^\s*step\s+(\d+)/i.exec(l);
+    if (m) found.push(Number(m[1]));
+  });
+  return found;
+}
+// Checks the payload graph against the CSA Diagram Standards so structural mistakes are reported on the page.
 function checkStandards(diagram: Diagram): string[] {
   const out: string[] = [];
   const byId = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
   const kindOf = (id: string | null) => (id ? (byId.get(id)?.kind || '') : '');
+  const nameOf = (id: string) => {
+    const n = byId.get(id);
+    return n ? firstLine(n) : id;
+  };
+  const edgeName = (e: GraphEdge) => '"' + nameOf(e.sourceId) + '" -> "' + nameOf(e.targetId) + '"';
   const childCount = new Map<string, number>();
+  const toolChildren = new Map<string, number>();
   for (const n of diagram.nodes) {
-    if (n.parentId) childCount.set(n.parentId, (childCount.get(n.parentId) || 0) + 1);
+    if (!n.parentId) continue;
+    childCount.set(n.parentId, (childCount.get(n.parentId) || 0) + 1);
+    if (!n.isContainer) toolChildren.set(n.parentId, (toolChildren.get(n.parentId) || 0) + 1);
+  }
+  const degree = new Map<string, number>();
+  for (const e of diagram.edges) {
+    degree.set(e.sourceId, (degree.get(e.sourceId) || 0) + 1);
+    degree.set(e.targetId, (degree.get(e.targetId) || 0) + 1);
   }
   const isSystem = (k: string) => k === 'system' || k === 'enterprise_system';
   const isCapability = (k: string) => k === 'capability' || k === 'business_capability';
   const isMacro = (k: string) => k === 'macro_env' || k === 'macro_environment';
+  const tools = diagram.nodes.filter(n => !n.isContainer);
+  const a = diagram.archetype;
 
   for (const n of diagram.nodes) {
     if (n.isContainer && KNOWN_CONTAINER_KINDS.indexOf(n.kind) < 0) {
-      out.push('Container "' + n.label + '" has unknown type "' + n.kind + '" (expected SYSTEM, CAPABILITY, MACRO_ENV, LOCATION, HOST or PERIMETER); drawn as a capability group.');
+      out.push('Container "' + firstLine(n) + '" has unknown type "' + n.kind + '" (expected SYSTEM, CAPABILITY, MACRO_ENV, LOCATION, HOST or PERIMETER); drawn with a red outline.');
     }
   }
 
   for (const e of diagram.edges) {
-    const s = byId.get(e.sourceId);
-    const t = byId.get(e.targetId);
-    if ((s && isCapability(s.kind)) || (t && isCapability(t.kind))) {
-      out.push('Connector "' + (s ? s.label : e.sourceId) + '" -> "' + (t ? t.label : e.targetId) + '" touches a CAPABILITY container; capabilities must have no connectors.');
+    if (isCapability(kindOf(e.sourceId)) || isCapability(kindOf(e.targetId))) {
+      out.push('Connector ' + edgeName(e) + ' touches a CAPABILITY container; capabilities must have no connectors.');
     }
   }
 
-  const a = diagram.archetype;
+  // Red Circle Rule / delta flags.
+  for (const n of tools) {
+    const raw = String(n.deltaFlag || 'Neutral').trim();
+    const flag = raw.toLowerCase();
+    if (DELTA_VALUES.indexOf(flag) < 0) {
+      out.push('Tool "' + firstLine(n) + '" has unknown delta_flag "' + raw + '" (expected Neutral, Adding, Changing or Retiring).');
+      continue;
+    }
+    if (flag === 'neutral') continue;
+    if (a !== 'DECOMPOSITION') {
+      out.push('Tool "' + firstLine(n) + '" is flagged "' + raw + '"; delta flags only apply to slides 7-9.');
+    } else if (diagram.key === 'slide_7') {
+      out.push('Current State tool "' + firstLine(n) + '" is flagged "' + raw + '"; slide 7 must be all Neutral.');
+    } else if (diagram.key === 'slide_8' && flag === 'adding') {
+      out.push('Interim State tool "' + firstLine(n) + '" is flagged Adding; slide 8 uses Changing for new, pilot or transitional tools.');
+    } else if (diagram.key === 'slide_9' && flag === 'retiring') {
+      out.push('Target State tool "' + firstLine(n) + '" is flagged Retiring; retired tools must be left off slide 9.');
+    }
+  }
+
   if (a === 'DECOMPOSITION') {
     for (const n of diagram.nodes) {
-      if (n.isContainer) {
-        if (isCapability(n.kind) && !isSystem(kindOf(n.parentId))) {
-          out.push('Capability "' + n.label + '" must be nested inside a SYSTEM container.');
-        }
-        continue;
+      if (!n.isContainer) continue;
+      if (isCapability(n.kind)) {
+        if (!isSystem(kindOf(n.parentId))) out.push('Capability "' + firstLine(n) + '" must be nested inside a SYSTEM container.');
+        if (toolChildren.get(n.id)) out.push('Capability "' + firstLine(n) + '" holds ' + toolChildren.get(n.id) + ' tool(s); capabilities must not contain tools.');
+      } else if (isSystem(n.kind)) {
+        if (n.parentId) out.push('Enterprise System "' + firstLine(n) + '" must sit at the root canvas, not inside "' + nameOf(n.parentId) + '".');
+        const hasCapability = diagram.nodes.some(c => c.parentId === n.id && isCapability(c.kind));
+        if (!hasCapability) out.push('Enterprise System "' + firstLine(n) + '" has no Business Capability inside it.');
+        const instances = diagram.edges.filter(e => e.sourceId === n.id && !byId.get(e.targetId)?.isContainer);
+        if (instances.length === 0) out.push('Enterprise System "' + firstLine(n) + '" has no Instance connector to a tool.');
       }
+    }
+    for (const e of diagram.edges) {
+      const fromSystem = isSystem(kindOf(e.sourceId));
+      if (fromSystem && byId.get(e.targetId)?.isContainer) {
+        out.push('Instance connector ' + edgeName(e) + ' must point at a tool, not a container.');
+      }
+      if (/^\s*instance\s*$/i.test(e.label || '') && !fromSystem) {
+        out.push('Connector ' + edgeName(e) + ' is labelled Instance but does not start at an Enterprise System.');
+      }
+      if (isSystem(kindOf(e.targetId))) {
+        out.push('Connector ' + edgeName(e) + ' points into an Enterprise System; Instance connectors go from the system to the tool.');
+      }
+    }
+    for (const n of tools) {
       if (n.category === 'internal') {
-        if (n.parentId !== null) out.push('Internal tool "' + n.label + '" must sit at the root canvas (parent_container null).');
-        const hasInstance = diagram.edges.some(e => e.targetId === n.id && isSystem(kindOf(e.sourceId)));
-        if (!hasInstance) out.push('Internal tool "' + n.label + '" has no Instance connector from an Enterprise System.');
+        if (n.parentId !== null) out.push('Internal tool "' + firstLine(n) + '" must sit at the root canvas (parent_container null).');
       } else if (n.category === 'external') {
-        if (kindOf(n.parentId) !== 'perimeter') out.push('External tool "' + n.label + '" must be inside the PERIMETER container (ext_perimeter).');
+        const pk = kindOf(n.parentId);
+        if (pk && pk !== 'perimeter') out.push('External tool "' + firstLine(n) + '" is inside "' + nameOf(n.parentId as string) + '"; external tools sit standalone at the root.');
       } else {
-        out.push('Tool "' + n.label + '" has no type of INTERNAL or EXTERNAL.');
+        out.push('Tool "' + firstLine(n) + '" has no type of INTERNAL or EXTERNAL.');
       }
+      if (!degree.get(n.id)) out.push('Tool "' + firstLine(n) + '" has no connectors.');
     }
   } else if (a === 'DEPLOYMENT') {
     if (diagram.edges.length > 0) out.push('System Deployment must have no connectors (found ' + diagram.edges.length + ').');
     for (const n of diagram.nodes) {
       if (n.isContainer) {
-        if (n.kind === 'location' && !isMacro(kindOf(n.parentId))) out.push('Location "' + n.label + '" must be nested inside a MACRO_ENV container.');
-        if (!childCount.get(n.id)) out.push('Container "' + n.label + '" is empty.');
+        if (n.kind === 'location' && !isMacro(kindOf(n.parentId))) out.push('Location "' + firstLine(n) + '" must be nested inside a MACRO_ENV container.');
+        if (isMacro(n.kind) && n.parentId) out.push('Environment "' + firstLine(n) + '" must sit at the root canvas.');
+        if (n.kind !== 'location' && !isMacro(n.kind)) out.push('Container "' + firstLine(n) + '" is type ' + n.kind.toUpperCase() + '; slide 10 only uses MACRO_ENV and LOCATION.');
+        if (!childCount.get(n.id)) out.push('Container "' + firstLine(n) + '" is empty.');
       } else if (kindOf(n.parentId) !== 'location') {
-        out.push('Tool "' + n.label + '" must be inside a LOCATION container.');
+        out.push('Tool "' + firstLine(n) + '" must be inside a LOCATION container.');
       }
     }
   } else if (a === 'INFO_FLOW') {
     for (const n of diagram.nodes) {
-      if (n.isContainer && n.kind === 'host' && !childCount.get(n.id)) out.push('HOST container "' + n.label + '" holds no datastore.');
-      if (!n.isContainer && n.isSoR && kindOf(n.parentId) !== 'host') out.push('System of Record "' + n.label + '" should be nested inside a HOST container.');
+      if (n.isContainer && n.kind === 'host' && !childCount.get(n.id)) out.push('HOST container "' + firstLine(n) + '" holds no datastore.');
+      if (!n.isContainer && n.isSoR && kindOf(n.parentId) !== 'host') out.push('System of Record "' + firstLine(n) + '" should be nested inside a HOST container.');
+      if (!n.isContainer && !degree.get(n.id)) out.push('"' + firstLine(n) + '" is not part of any step.');
     }
+    const unnumbered: string[] = [];
+    const mislabeled: string[] = [];
+    const firsts: number[] = [];
+    const all: number[] = [];
+    for (const e of diagram.edges) {
+      const nums = stepsOf(e);
+      if (nums.length === 0) {
+        unnumbered.push(edgeName(e));
+        continue;
+      }
+      firsts.push(nums[0]);
+      nums.forEach(num => {
+        all.push(num);
+        if (!new RegExp('\\bstep\\s+' + num + '\\b', 'i').test(e.label || '')) mislabeled.push(edgeName(e) + ' (step ' + num + ')');
+      });
+    }
+    if (unnumbered.length > 0) out.push(unnumbered.length + ' connector(s) have no stepNumber: ' + listSome(unnumbered) + '.');
+    if (mislabeled.length > 0) out.push('Connector label does not include its "Step N": ' + listSome(mislabeled) + '.');
+    const sorted = all.slice().sort((x, y) => x - y);
+    const dups = sorted.filter((n, i) => i > 0 && n === sorted[i - 1]);
+    if (dups.length > 0) out.push('Duplicate step number(s): ' + Array.from(new Set(dups)).join(', ') + '.');
+    if (firsts.some((n, i) => i > 0 && n < firsts[i - 1])) out.push('Steps are not in ascending order in the connectors array: ' + firsts.join(', ') + '.');
+    const gaps: number[] = [];
+    for (let i = 1; i <= (sorted[sorted.length - 1] || 0); i++) if (sorted.indexOf(i) < 0) gaps.push(i);
+    if (gaps.length > 0) out.push('Step numbering has gaps; missing step(s) ' + gaps.join(', ') + '.');
   } else if (a === 'CONTEXT') {
     for (const n of diagram.nodes) {
-      if (n.isContainer && !childCount.get(n.id)) out.push('Container "' + n.label + '" is empty.');
+      if (!n.isContainer) continue;
+      if (!childCount.get(n.id)) out.push('Container "' + firstLine(n) + '" is empty.');
+      if (!isCapability(n.kind)) out.push('Container "' + firstLine(n) + '" is type ' + n.kind.toUpperCase() + '; slide 6 groups peripheral tools in CAPABILITY containers.');
+    }
+    const flagged = tools.filter(n => n.isCore === true);
+    const cores = flagged.length > 0 ? flagged : tools.filter(n => !n.parentId);
+    const coreIds = new Set(cores.map(n => n.id));
+    if (cores.length === 0) out.push('System Context has no central core tool (isCore true, parent_container null).');
+    for (const n of cores) {
+      if (n.parentId) out.push('Core tool "' + firstLine(n) + '" must sit at the root canvas, not inside "' + nameOf(n.parentId) + '".');
+    }
+    for (const n of tools) {
+      if (!coreIds.has(n.id) && !n.parentId) out.push('Peripheral tool "' + firstLine(n) + '" should be inside a capability container.');
+    }
+    for (const e of diagram.edges) {
+      if (!coreIds.has(e.targetId)) out.push('Connector ' + edgeName(e) + ' does not point at the core tool; slide 6 flows point inward.');
     }
   }
   return out;
 }
+// Post-layout checks: problems here mean ELK's output, not the payload, is off.
+function checkGeometry(placed: Placed[], layout: any): string[] {
+  const out: string[] = [];
+  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
+  const parents = new Set(placed.map(p => p.node.parentId).filter(id => id !== null) as string[]);
+
+  const bad = placed.filter(p => ![p.x, p.y, p.w, p.h].every(v => typeof v === 'number' && isFinite(v)) || p.w <= 0 || p.h <= 0);
+  if (bad.length > 0) out.push('ELK returned invalid coordinates or size for ' + bad.length + ' item(s): ' + listSome(bad.map(p => '"' + firstLine(p.node) + '"')) + '.');
+
+  const spills: string[] = [];
+  for (const p of placed) {
+    const parent = p.node.parentId ? byId.get(p.node.parentId) : undefined;
+    if (!parent) continue;
+    const o = outerBox(p);
+    const top = parent.y + headerHeight(parent.node.label, parent.w);
+    if (o.x < parent.x - 1 || o.y < top - 1 || o.x + o.w > parent.x + parent.w + 1 || o.y + o.h > parent.y + parent.h + 1) {
+      spills.push('"' + firstLine(p.node) + '" in "' + firstLine(parent.node) + '"');
+    }
+  }
+  if (spills.length > 0) out.push(spills.length + ' shape(s) spill outside their container or under its title: ' + listSome(spills) + '.');
+
+  const narrow = placed.filter(p => parents.has(p.node.id) && p.w < headerMinWidth(p.node.label) - 2);
+  if (narrow.length > 0) out.push('Container title may be cut off (ELK ignored the minimum width): ' + listSome(narrow.map(p => '"' + firstLine(p.node) + '"')) + '.');
+
+  const groups = new Map<string | null, Placed[]>();
+  for (const p of placed) {
+    const list = groups.get(p.node.parentId) || [];
+    list.push(p);
+    groups.set(p.node.parentId, list);
+  }
+  const overlaps: string[] = [];
+  groups.forEach(list => {
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const r1 = outerBox(list[i]);
+        const r2 = outerBox(list[j]);
+        if (r1.x + 1 < r2.x + r2.w && r2.x + 1 < r1.x + r1.w && r1.y + 1 < r2.y + r2.h && r2.y + 1 < r1.y + r1.h) {
+          overlaps.push('"' + firstLine(list[i].node) + '" / "' + firstLine(list[j].node) + '"');
+        }
+      }
+    }
+  });
+  if (overlaps.length > 0) out.push(overlaps.length + ' overlapping shape pair(s): ' + listSome(overlaps) + '.');
+
+  const W = Math.round(layout?.width || 0);
+  const H = Math.round(layout?.height || 0);
+  if (W > 5000 || H > 4000) out.push('Layout is ' + W + 'x' + H + ' px, far larger than a slide; consider fewer items or shorter labels.');
+  return out;
+}
+
+// Liang-Barsky clip test.
+function segmentHitsRect(x1: number, y1: number, x2: number, y2: number, r: Box): boolean {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const p = [-dx, dx, -dy, dy];
+  const q = [x1 - r.x, r.x + r.w - x1, y1 - r.y, r.y + r.h - y1];
+  let t0 = 0;
+  let t1 = 1;
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i] < 0) return false;
+      continue;
+    }
+    const t = q[i] / p[i];
+    if (p[i] < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+  }
+  return true;
+}
+
+// Lucid routes the lines itself, so a direct path through another shape predicts crossings and detours.
+function checkConnectorPaths(diagram: Diagram, placed: Placed[]): string[] {
+  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
+  const ancestors = (id: string): string[] => {
+    const seen: string[] = [];
+    let cur = byId.get(id)?.node.parentId ?? null;
+    while (cur && seen.indexOf(cur) < 0) {
+      seen.push(cur);
+      cur = byId.get(cur)?.node.parentId ?? null;
+    }
+    return seen;
+  };
+  const hits: string[] = [];
+  for (const e of diagram.edges) {
+    const a = byId.get(e.sourceId);
+    const b = byId.get(e.targetId);
+    if (!a || !b) continue;
+    const links = facingLinks(a, b);
+    const x1 = a.x + a.w * links.from.x;
+    const y1 = a.y + a.h * links.from.y;
+    const x2 = b.x + b.w * links.to.x;
+    const y2 = b.y + b.h * links.to.y;
+    const skip = new Set<string>([a.node.id, b.node.id].concat(ancestors(a.node.id), ancestors(b.node.id)));
+    for (const p of placed) {
+      if (skip.has(p.node.id)) continue;
+      const r = { x: p.x + 2, y: p.y + 2, w: p.w - 4, h: p.h - 4 };
+      if (r.w > 0 && r.h > 0 && segmentHitsRect(x1, y1, x2, y2, r)) {
+        hits.push('"' + firstLine(a.node) + '" -> "' + firstLine(b.node) + '" crosses "' + firstLine(p.node) + '"');
+        break;
+      }
+    }
+  }
+  if (hits.length === 0) return [];
+  return [hits.length + ' connector(s) cross other shapes on a direct path, so Lucid may draw them over or around boxes: ' + listSome(hits) + '.'];
+}
+
+interface LayoutResult {
+  layout: any;
+  failure: string | null;
+  mode: 'elk' | 'elk-simple' | 'grid';
+}
 
 // failure is set when ELK could not lay the diagram out as requested.
-async function computeLayout(diagram: Diagram, tag: string): Promise<{ layout: any; failure: string | null }> {
+async function computeLayout(diagram: Diagram, tag: string): Promise<LayoutResult> {
   const opts = rootLayoutOptions(diagram);
+  const summary = 'algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length + ', edges=' + diagram.edges.length;
+  let started = Date.now();
   let firstError = '';
   try {
-    return { layout: await elk.layout(buildElkGraph(diagram)), failure: null };
+    const layout = await elk.layout(buildElkGraph(diagram));
+    console.info(tag + ' ELK layout ok in ' + (Date.now() - started) + ' ms (' + summary + '), canvas ' + Math.round(layout.width || 0) + 'x' + Math.round(layout.height || 0));
+    return { layout, failure: null, mode: 'elk' };
   } catch (err) {
     firstError = shortError(err);
-    console.error(
-      tag + ' ELK layout failed (algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length +
-      ', edges=' + diagram.edges.length + '): ' + describeError(err)
-    );
+    console.error(tag + ' ELK layout failed after ' + (Date.now() - started) + ' ms (' + summary + '): ' + describeError(err));
   }
   let retryError = '';
+  started = Date.now();
   try {
     const graph = buildElkGraph(diagram);
     graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT' };
-    return { layout: await elk.layout(graph), failure: 'ELK full layout failed (' + firstError + '); a simplified layout was used instead.' };
+    const layout = await elk.layout(graph);
+    console.info(tag + ' ELK simple retry ok in ' + (Date.now() - started) + ' ms');
+    return { layout, failure: 'ELK full layout failed (' + firstError + '); a simplified layout was used instead.', mode: 'elk-simple' };
   } catch (err) {
     retryError = shortError(err);
     console.error(tag + ' ELK simple retry failed; using grid layout: ' + describeError(err));
   }
   return {
     layout: gridLayout(diagram),
-    failure: 'ELK failed, so a flat grid with no nesting was used. Full layout: ' + firstError + ' | Simple retry: ' + retryError
+    failure: 'ELK failed, so a flat grid with no nesting was used. Full layout: ' + firstError + ' | Simple retry: ' + retryError,
+    mode: 'grid'
   };
 }
 
@@ -591,8 +1058,52 @@ function addIssuesNote(page: PageProxy, issues: string[]): void {
       fillStyle: '#fde8e8'
     });
     setLabel(note, 'RENDER ISSUES (' + issues.length + ')\n' + shown.join('\n'));
-    note.properties.set('LineColor', '#D0021B');
+    note.properties.set('LineColor', RED);
     note.properties.set('LineWidth', 3);
+  });
+}
+// Key box to the right of the diagram, listing only the roles that appear on the page.
+function drawLegend(page: PageProxy, placed: Placed[], roles: Map<string, string>, ctx: DrawContext): void {
+  if (placed.length === 0) return;
+  const right = Math.max(...placed.map(p => {
+    const o = outerBox(p);
+    return o.x + o.w;
+  }));
+  const x = right + CANVAS_MARGIN + 100;
+  const top = CANVAS_MARGIN;
+
+  const seen = new Set<string>();
+  const entries: Array<{ swatch: Swatch; text: string; classes: string[]; dashed?: boolean; lineWidth?: number }> = [];
+  roles.forEach(role => {
+    const swatch = KEY[role] || KEY.unknown;
+    if (seen.has(swatch.legend)) return;
+    seen.add(swatch.legend);
+    entries.push({ swatch, text: swatch.legend, classes: RECT_CLASSES });
+  });
+  if (placed.some(p => isRedCircle(p.node))) {
+    entries.push({ swatch: { fill: TRANSPARENT, line: RED, legend: '' }, text: 'Adding / Changing', classes: ELLIPSE_CLASSES, lineWidth: 3 });
+  }
+  if (placed.some(p => isRetiring(p.node))) {
+    entries.push({ swatch: { fill: KEY.tool.fill, line: RETIRING_LINE, legend: '' }, text: 'Retiring', classes: RECT_CLASSES, dashed: true });
+  }
+  if (entries.length === 0) return;
+
+  const ENTRY_W = 220;
+  const ENTRY_H = 36;
+  const GAP = 12;
+  const frameH = 56 + entries.length * (ENTRY_H + GAP) + 8;
+  drawShape(page, { classes: RECT_CLASSES, box: { x: x - 20, y: top, w: ENTRY_W + 40, h: frameH }, fill: '#FFFFFF', line: '#9CA3AF', lineWidth: 1 }, 'Key frame', ctx);
+  drawShape(page, { classes: RECT_CLASSES, box: { x, y: top + 8, w: ENTRY_W, h: 36 }, fill: TRANSPARENT, line: TRANSPARENT, lineWidth: 0, text: 'Key', bold: true }, 'Key title', ctx);
+  entries.forEach((e, i) => {
+    drawShape(page, {
+      classes: e.classes,
+      box: { x, y: top + 56 + i * (ENTRY_H + GAP), w: ENTRY_W, h: ENTRY_H },
+      fill: e.swatch.fill,
+      line: e.swatch.line,
+      lineWidth: e.lineWidth || 2,
+      dashed: e.dashed,
+      text: e.text
+    }, 'Key entry "' + e.text + '"', ctx);
   });
 }
 
@@ -603,78 +1114,116 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   const nodeById = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
   issues.push(...checkStandards(rawDiagram));
 
-  const { layout, failure } = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
+  const { layout, failure, mode } = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
   if (failure) issues.unshift(failure);
   const placed: Placed[] = [];
   flattenLayout(layout, 0, 0, nodeById, placed);
   if (placed.length < diagram.nodes.length) {
-    issues.push('Layout positioned ' + placed.length + ' of ' + diagram.nodes.length + ' items.');
+    const missing = diagram.nodes.filter(n => !placed.some(p => p.node.id === n.id)).map(n => '"' + firstLine(n) + '"');
+    issues.push('Layout positioned ' + placed.length + ' of ' + diagram.nodes.length + ' items; missing ' + listSome(missing) + '.');
+  }
+  if (mode !== 'grid') {
+    issues.push(...checkGeometry(placed, layout));
+    issues.push(...checkConnectorPaths(diagram, placed));
   }
 
-  const classFor = new Map<string, string>();
+  const parents = new Set(diagram.nodes.map(n => n.parentId).filter(id => id !== null) as string[]);
+  const roles = new Map<string, string>();
+  const badgeFor = new Map<string, string>();
   const wanted = new Set<string>([FALLBACK_CLASS]);
-  const inferred: string[] = [];
+  const unmapped: string[] = [];
+  const useBadges = SHOW_GCP_BADGES && diagram.archetype !== 'CONTEXT';
   for (const p of placed) {
-    let className: string;
-    if (p.node.isContainer) {
-      className = containerClassFor(p.node);
-    } else {
-      const mapped = resolveGcpClass(p.node);
-      if (mapped) {
-        className = mapped;
-      } else {
-        className = inferToolClass(p.node);
-        inferred.push(toolName(p.node) + ' -> ' + className);
-        if (looksLikeGcp(p.node)) {
-          issues.push('GCP tool "' + p.node.label + '" (technology "' + toolName(p.node) + '") has no GCP 2021 icon mapping; drawn as a generic ' + className.replace('GCP2021Container', '') + ' shape.');
-        }
+    const role = roleFor(p.node, diagram.archetype);
+    roles.set(p.node.id, role);
+    shapeClassesFor(p.node, role, diagram.archetype).forEach(c => wanted.add(c));
+    if (isRedCircle(p.node)) ELLIPSE_CLASSES.forEach(c => wanted.add(c));
+    if (useBadges && !p.node.isContainer) {
+      const gcp = resolveGcpClass(p.node);
+      if (gcp) {
+        badgeFor.set(p.node.id, gcp);
+        wanted.add(gcp);
+      } else if (looksLikeGcp(p.node)) {
+        unmapped.push('"' + firstLine(p.node) + '" (technology "' + toolName(p.node) + '")');
       }
     }
-    classFor.set(p.node.id, className);
-    wanted.add(className);
+  }
+  if (unmapped.length > 0) {
+    issues.push(unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon: ' + listSome(unmapped) + '. Add them to GCP_CLASS_MAP.');
   }
 
   const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
-  const failedClasses = Array.from(wanted).filter(c => !available.has(c));
-  for (const cls of failedClasses) {
-    const users = placed.filter(p => classFor.get(p.node.id) === cls).map(p => p.node.label);
-    issues.push('Shape class "' + cls + '" failed to load, so ' + (users.length > 0 ? users.length + ' shape(s) (' + users.slice(0, 3).join(', ') + (users.length > 3 ? ', ...' : '') + ')' : 'its shapes') + ' use a plain box.');
+  const ctx: DrawContext = {
+    issues,
+    unavailable: new Set(Array.from(wanted).filter(c => !available.has(c))),
+    substitutions: new Map<string, number>(),
+    fillMismatches: []
+  };
+  const failedBadges = Array.from(new Set(Array.from(badgeFor.values()))).filter(c => !available.has(c));
+  if (failedBadges.length > 0) {
+    issues.push('GCP 2021 icon class(es) failed to load, so those icons are missing: ' + listSome(failedBadges) + '.');
   }
 
   const blocks = new Map<string, BlockProxy>();
   let blocksSkipped = 0;
   await stage(tag, 'create-blocks', () => {
     for (const p of placed) {
-      const preferred = classFor.get(p.node.id) || FALLBACK_CLASS;
-      const className = available.has(preferred) ? preferred : FALLBACK_CLASS;
-      try {
-        blocks.set(p.node.id, createBlock(page, p, className, issues));
-      } catch (err) {
-        console.warn(tag + ' block ' + p.node.id + ' ("' + p.node.label + '") failed with class ' + className + ': ' + describeError(err));
-        issues.push('Shape "' + p.node.label + '" could not be created with class ' + className + ' (' + shortError(err) + '); retried as a plain box.');
-        try {
-          blocks.set(p.node.id, createBlock(page, p, FALLBACK_CLASS, issues));
-        } catch (err2) {
-          blocksSkipped++;
-          console.error(tag + ' block ' + p.node.id + ' skipped, fallback also failed: ' + describeError(err2));
-          issues.push('Shape "' + p.node.label + '" was skipped; the plain box also failed (' + shortError(err2) + ').');
+      const role = roles.get(p.node.id) || 'unknown';
+      const swatch = KEY[role] || KEY.unknown;
+      const box = canvasBox(p);
+      const name = firstLine(p.node);
+      let block: BlockProxy | null;
+
+      if (p.node.isContainer && parents.has(p.node.id)) {
+        block = drawShape(page, { classes: RECT_CLASSES, box, fill: swatch.fill, line: swatch.line, lineWidth: 2 }, swatch.legend + ' "' + name + '"', ctx);
+        const titleBox = { x: box.x, y: box.y, w: box.w, h: headerHeight(p.node.label, box.w) };
+        drawShape(page, { classes: RECT_CLASSES, box: titleBox, fill: TRANSPARENT, line: TRANSPARENT, lineWidth: 0, text: p.node.label, bold: true }, swatch.legend + ' title "' + name + '"', ctx);
+      } else if (p.node.isContainer) {
+        block = drawShape(page, { classes: RECT_CLASSES, box, fill: swatch.fill, line: swatch.line, lineWidth: 2, text: p.node.label, bold: true }, swatch.legend + ' "' + name + '"', ctx);
+      } else {
+        if (isRedCircle(p.node)) {
+          const m = ellipseMargin(box.w, box.h);
+          drawShape(page, {
+            classes: ELLIPSE_CLASSES,
+            box: { x: box.x - m.mx + 4, y: box.y - m.my + 4, w: box.w + 2 * (m.mx - 4), h: box.h + 2 * (m.my - 4) },
+            fill: TRANSPARENT,
+            line: RED,
+            lineWidth: 3
+          }, 'Red circle around "' + name + '"', ctx);
         }
+        const retiring = isRetiring(p.node);
+        const rect = shapeClassesFor(p.node, role, diagram.archetype) === RECT_CLASSES;
+        block = drawShape(page, {
+          classes: shapeClassesFor(p.node, role, diagram.archetype),
+          box,
+          fill: swatch.fill,
+          line: retiring ? RETIRING_LINE : swatch.line,
+          lineWidth: 2,
+          dashed: retiring,
+          rounding: rect && (role === 'tool' || role === 'externalTool') ? 10 : 0,
+          text: p.node.label
+        }, swatch.legend + ' "' + name + '"', ctx);
+        const badge = badgeFor.get(p.node.id);
+        if (block && badge && available.has(badge)) drawGcpBadge(page, badge, box, name, issues);
+      }
+
+      if (block) {
+        blocks.set(p.node.id, block);
+      } else {
+        blocksSkipped++;
       }
     }
   });
 
-  if (inferred.length > 0) {
-    console.info(tag + ' tools without a GCP icon, drawn with an inferred shape:', inferred);
-  }
-
   let linesCreated = 0;
   let linesSkipped = 0;
+  const placedById = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
   await stage(tag, 'create-lines', () => {
     for (const edge of diagram.edges) {
       const source = blocks.get(edge.sourceId);
       const target = blocks.get(edge.targetId);
-      const a = placed.find(p => p.node.id === edge.sourceId);
-      const b = placed.find(p => p.node.id === edge.targetId);
+      const a = placedById.get(edge.sourceId);
+      const b = placedById.get(edge.targetId);
       if (source && target && a && b && createLine(page, source, target, edge, facingLinks(a, b))) {
         linesCreated++;
       } else {
@@ -684,11 +1233,21 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
     }
   });
 
+  await stage(tag, 'legend', () => drawLegend(page, placed, roles, ctx));
+
+  ctx.substitutions.forEach((count, key) => {
+    issues.push(count + ' shape(s) wanted class ' + key.replace(' -> ', ' but were drawn as ') + ', so they will not match the reference key.');
+  });
+  if (ctx.fillMismatches.length > 0) {
+    issues.push(ctx.fillMismatches.length + ' shape(s) did not take their key colour: ' + listSome(ctx.fillMismatches) + '.');
+  }
+
   if (issues.length > 0) addIssuesNote(page, issues);
 
   console.info(
-    tag + ' done: blocks ' + blocks.size + ' created/' + blocksSkipped + ' skipped, lines ' +
-    linesCreated + ' created/' + linesSkipped + ' skipped, issues ' + issues.length
+    tag + ' done (layout ' + mode + '): blocks ' + blocks.size + ' created/' + blocksSkipped + ' skipped, lines ' +
+    linesCreated + ' created/' + linesSkipped + ' skipped, issues ' + issues.length +
+    (ctx.unavailable.size > 0 ? ', unavailable classes ' + Array.from(ctx.unavailable).join(', ') : '')
   );
   return issues;
 }

@@ -62,7 +62,8 @@ function normalizeDiagram(diagram, index, errors) {
       technology: isContainer ? null : String(item.Technology || item.technology || item.name || item.label || '') || null,
       category: isContainer ? '' : String(item.type || '').toLowerCase(),
       deltaFlag: isContainer ? '' : String(item.delta_flag || 'Neutral'),
-      isSoR: !isContainer && item.is_sor === true
+      isSoR: !isContainer && item.is_sor === true,
+      isCore: !isContainer && item.isCore === true
     });
   };
 
@@ -104,6 +105,8 @@ function normalizeDiagram(diagram, index, errors) {
     const pairKey = sourceId < targetId ? sourceId + '||' + targetId : targetId + '||' + sourceId;
     const existing = edgeMap.get(pairKey);
     const bidirectionalFlag = c.type === 'bidirectional';
+    const step = Number(c.stepNumber);
+    const hasStep = c.stepNumber !== undefined && c.stepNumber !== null && c.stepNumber !== '' && Number.isFinite(step);
 
     if (!existing) {
       edgeMap.set(pairKey, {
@@ -111,11 +114,13 @@ function normalizeDiagram(diagram, index, errors) {
         sourceId: sourceId,
         targetId: targetId,
         labels: c.label ? [String(c.label)] : [],
-        bidirectional: bidirectionalFlag
+        bidirectional: bidirectionalFlag,
+        stepNumbers: hasStep ? [step] : []
       });
     } else {
       if (c.label && existing.labels.indexOf(String(c.label)) === -1) existing.labels.push(String(c.label));
       if (existing.sourceId !== sourceId || bidirectionalFlag) existing.bidirectional = true;
+      if (hasStep && existing.stepNumbers.indexOf(step) === -1) existing.stepNumbers.push(step);
     }
   });
 
@@ -124,7 +129,8 @@ function normalizeDiagram(diagram, index, errors) {
     sourceId: e.sourceId,
     targetId: e.targetId,
     label: e.labels.join('\n'),
-    bidirectional: e.bidirectional
+    bidirectional: e.bidirectional,
+    stepNumbers: e.stepNumbers
   }));
 
   return {
