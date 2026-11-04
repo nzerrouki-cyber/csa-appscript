@@ -337,7 +337,23 @@ function createBlock(page: PageProxy, placed: Placed, className: string): BlockP
     ...(isContainer && className === FALLBACK_CLASS ? { fillStyle: '#f3f4f6' } : {})
   });
 
-  trySet('text', () => block.textAreas.set('Text', placed.node.label));
+  // Fallback array for GCP 2021 text assignments
+  const possibleKeys = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
+  let textSet = false;
+  
+  for (const key of possibleKeys) {
+    try {
+      block.textAreas.set(key, placed.node.label);
+      textSet = true;
+      break; // Stop once successful
+    } catch (err) {
+      // Silently continue to the next fallback key
+    }
+  }
+
+  if (!textSet) {
+    console.warn(`[Renderer] Could not set text on shape ${placed.node.id} for label: ${placed.node.label}`);
+  }
 
   if (/add|chang|red/i.test(placed.node.deltaFlag)) {
     trySet('delta border', () => {
