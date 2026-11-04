@@ -65,6 +65,7 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   const tag = '[' + diagram.pageTitle + ']';
   const seen = new Set<string>();
   const nodes: GraphNode[] = [];
+  
   for (const raw of diagram.nodes || []) {
     if (!raw || raw.id === undefined || raw.id === null || raw.id === '') {
       console.warn(tag + ' dropping node with missing id:', JSON.stringify(raw));
@@ -76,10 +77,17 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
       continue;
     }
     seen.add(id);
+    
+    // Feature 1: Append (SoR) to labels for authoritative stores dynamically
+    let label = String(raw.label === undefined || raw.label === null ? '' : raw.label);
+    if (raw.isSoR && !label.endsWith('(SoR)')) {
+      label = label ? `${label}\n(SoR)` : '(SoR)';
+    }
+
     nodes.push({
       ...raw,
       id,
-      label: String(raw.label === undefined || raw.label === null ? '' : raw.label),
+      label,
       kind: String(raw.kind || ''),
       deltaFlag: String(raw.deltaFlag || ''),
       category: String(raw.category || ''),
@@ -88,12 +96,14 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   }
 
   const byId = new Map(nodes.map(n => [n.id, n] as [string, GraphNode]));
+  
   for (const n of nodes) {
     if (n.parentId !== null && (n.parentId === n.id || !byId.has(n.parentId))) {
       console.warn(tag + ' node ' + n.id + ' has missing/self parent "' + n.parentId + '"; moving to top level.');
       n.parentId = null;
     }
   }
+  
   for (const n of nodes) {
     const chain = new Set<string>([n.id]);
     let cur = n.parentId;
@@ -110,20 +120,38 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
 
   const edgeIds = new Set<string>();
   const edges: GraphEdge[] = [];
-  (diagram.edges || []).forEach((raw, i) => {
-    const sourceId = String(raw?.sourceId);
-    const targetId = String(raw?.targetId);
-    if (!byId.has(sourceId) || !byId.has(targetId)) {
-      console.warn(tag + ' dropping edge ' + raw?.id + ' with unknown endpoint(s): ' + sourceId + ' -> ' + targetId);
-      return;
+  
+  // Feature 2: Slide 10 (Deployment) Zero-Line Mandate
+  if (diagram.archetype !== 'DEPLOYMENT') {
+    (diagram.edges || []).forEach((raw, i) => {
+      const sourceId = String(raw?.sourceId);
+      const targetId = String(raw?.targetId);
+      
+      if (!byId.has(sourceId) || !byId.has(targetId)) {
+        console.warn(tag + ' dropping edge ' + raw?.id + ' with unknown endpoint(s): ' + sourceId + ' -> ' + targetId);
+        return;
+      }
+
+      // Feature 3: Capability Zero-Connector Zone Enforcement
+      const sourceNode = byId.get(sourceId);
+      const targetNode = byId.get(targetId);
+      if (sourceNode?.kind === 'capability' || targetNode?.kind === 'capability') {
+        console.warn(tag + ' dropping invalid capability edge (Zero-Connector Zone): ' + sourceId + ' -> ' + targetId);
+        return;
+      }
+
+      let id = raw.id === undefined || raw.id === null || raw.id === '' ? 'edge_' + i : String(raw.id);
+      if (edgeIds.has(id) || byId.has(id) || id === 'root') {
+        id = id + '__' + i;
+      }
+      edgeIds.add(id);
+      edges.push({ ...raw, id, sourceId, targetId, label: String(raw.label || ''), bidirectional: !!raw.bidirectional });
+    });
+  } else {
+    if ((diagram.edges || []).length > 0) {
+      console.warn(tag + ' DEPLOYMENT archetype detected; stripping all edges to enforce zero-line mandate.');
     }
-    let id = raw.id === undefined || raw.id === null || raw.id === '' ? 'edge_' + i : String(raw.id);
-    if (edgeIds.has(id) || byId.has(id) || id === 'root') {
-      id = id + '__' + i;
-    }
-    edgeIds.add(id);
-    edges.push({ ...raw, id, sourceId, targetId, label: String(raw.label || ''), bidirectional: !!raw.bidirectional });
-  });
+  }
 
   return { ...diagram, nodes, edges };
 }
@@ -198,6 +226,7 @@ function containerClassFor(node: GraphNode): string {
     case 'business_capability':
     case 'capability':
       return C.capability;
+    case 'macro_env':
     case 'macro_environment':
       if (/on-?prem|colo|data\s*cent|\bdc\b/.test(label)) return C.onPrem;
       if (/gcp|google|cloud|aws|azure/.test(label)) return C.cloudProvider;
@@ -207,9 +236,12 @@ function containerClassFor(node: GraphNode): string {
       if (/sub-?net/.test(label)) return C.subnet;
       if (/zone/.test(label)) return C.zone;
       return C.region;
+    case 'host':
+      return C.infrastructure;
     case 'perimeter':
       return C.saas;
     default:
+      console.warn('Unknown container type "' + node.kind + '" for ' + node.id + '; drawn as a capability group.');
       return C.capability;
   }
 }
@@ -329,7 +361,33 @@ function trySet(label: string, fn: () => void): void {
   }
 }
 
-function createBlock(page: PageProxy, placed: Placed, className: string): BlockProxy {
+const LABEL_KEYS = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
+
+// set() on an unknown text area key does not throw, so each write is read back to confirm it took.
+function setLabel(block: BlockProxy, label: string): boolean {
+  let existing: string[] = [];
+  try {
+    existing = Array.from(block.textAreas.keys());
+  } catch (err) {
+    console.warn('Could not list text areas: ' + describeError(err));
+  }
+
+  const preferred = LABEL_KEYS.filter(k => existing.some(e => e.toLowerCase() === k.toLowerCase()))
+    .map(k => existing.find(e => e.toLowerCase() === k.toLowerCase()) as string);
+  const candidates = Array.from(new Set([...preferred, ...existing, ...LABEL_KEYS]));
+
+  for (const key of candidates) {
+    try {
+      block.textAreas.set(key, label);
+      if (String(block.textAreas.get(key) ?? '').replace(/\s+/g, '') === label.replace(/\s+/g, '')) return true;
+    } catch {
+      // try the next key
+    }
+  }
+  return false;
+}
+
+function createBlock(page: PageProxy, placed: Placed, className: string, issues: string[]): BlockProxy {
   const isContainer = placed.node.isContainer;
   const block = page.addBlock({
     className,
@@ -337,48 +395,56 @@ function createBlock(page: PageProxy, placed: Placed, className: string): BlockP
     ...(isContainer && className === FALLBACK_CLASS ? { fillStyle: '#f3f4f6' } : {})
   });
 
-  // Fallback array for GCP 2021 text assignments
-  const possibleKeys = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
-  let textSet = false;
-  
-  for (const key of possibleKeys) {
-    try {
-      block.textAreas.set(key, placed.node.label);
-      textSet = true;
-      break; // Stop once successful
-    } catch (err) {
-      // Silently continue to the next fallback key
-    }
+  if (!setLabel(block, placed.node.label)) {
+    console.warn('[Renderer] Could not set text on shape ' + placed.node.id);
+    issues.push('Label not written on "' + placed.node.label + '" (' + className + '); the shape shows its default text.');
   }
 
-  if (!textSet) {
-    console.warn(`[Renderer] Could not set text on shape ${placed.node.id} for label: ${placed.node.label}`);
-  }
-
+  // Handle Adding/Changing (Red Border)
   if (/add|chang|red/i.test(placed.node.deltaFlag)) {
     trySet('delta border', () => {
       block.properties.set('LineColor', '#D0021B');
       block.properties.set('LineWidth', 3);
     });
+  } 
+  // Handle Retiring (Dashed Gray Border)
+  else if (/retir/i.test(placed.node.deltaFlag)) {
+    trySet('retiring border', () => {
+      block.properties.set('LineColor', '#9CA3AF'); // Gray-400
+      block.properties.set('LineWidth', 2);
+      block.properties.set('StrokeStyle', 'dashed');
+    });
   }
+  
   return block;
 }
 
-function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge): boolean {
-  const endpoint = (block: BlockProxy, style?: string) => ({
+// Attach each end to the border facing the other shape instead of the centre, so lines leave
+// and enter at box edges rather than being drawn through neighbouring shapes.
+function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to: { x: number; y: number } } {
+  const dx = b.x + b.w / 2 - (a.x + a.w / 2);
+  const dy = b.y + b.h / 2 - (a.y + a.h / 2);
+  if (Math.abs(dx) / (a.w + b.w) >= Math.abs(dy) / (a.h + b.h)) {
+    return dx >= 0 ? { from: { x: 1, y: 0.5 }, to: { x: 0, y: 0.5 } } : { from: { x: 0, y: 0.5 }, to: { x: 1, y: 0.5 } };
+  }
+  return dy >= 0 ? { from: { x: 0.5, y: 1 }, to: { x: 0.5, y: 0 } } : { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } };
+}
+
+function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, links: { from: { x: number; y: number }; to: { x: number; y: number } }): boolean {
+  const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
     connection: block,
-    linkX: 0.5,
-    linkY: 0.5,
-    autoLink: true,
+    linkX: at.x,
+    linkY: at.y,
+    autoLink: false,
     ...(style ? { style } : {})
   });
 
   const attempts: Array<[string, () => any]> = [
     ['styled', () => page.addLine({
-      endpoint1: endpoint(source, edge.bidirectional ? 'Arrow' : undefined),
-      endpoint2: endpoint(target, 'Arrow')
+      endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
+      endpoint2: endpoint(target, links.to, 'Arrow')
     })],
-    ['unstyled', () => page.addLine({ endpoint1: endpoint(source), endpoint2: endpoint(target) })],
+    ['unstyled', () => page.addLine({ endpoint1: endpoint(source, links.from), endpoint2: endpoint(target, links.to) })],
     ['bare', () => page.addLine({ endpoint1: { connection: source }, endpoint2: { connection: target } } as any)]
   ];
 
@@ -409,38 +475,144 @@ function gridLayout(diagram: Diagram): any {
   };
 }
 
-async function computeLayout(diagram: Diagram, tag: string): Promise<any> {
+function shortError(err: unknown): string {
+  const first = describeError(err).split('\n')[0];
+  return first.length > 300 ? first.substring(0, 300) + '...' : first;
+}
+
+const KNOWN_CONTAINER_KINDS = ['system', 'enterprise_system', 'capability', 'business_capability', 'macro_env', 'macro_environment', 'location', 'host', 'perimeter'];
+
+// Checks the normalized graph against the CSA Diagram Standards so structural mistakes are reported on the page.
+function checkStandards(diagram: Diagram): string[] {
+  const out: string[] = [];
+  const byId = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
+  const kindOf = (id: string | null) => (id ? (byId.get(id)?.kind || '') : '');
+  const childCount = new Map<string, number>();
+  for (const n of diagram.nodes) {
+    if (n.parentId) childCount.set(n.parentId, (childCount.get(n.parentId) || 0) + 1);
+  }
+  const isSystem = (k: string) => k === 'system' || k === 'enterprise_system';
+  const isCapability = (k: string) => k === 'capability' || k === 'business_capability';
+  const isMacro = (k: string) => k === 'macro_env' || k === 'macro_environment';
+
+  for (const n of diagram.nodes) {
+    if (n.isContainer && KNOWN_CONTAINER_KINDS.indexOf(n.kind) < 0) {
+      out.push('Container "' + n.label + '" has unknown type "' + n.kind + '" (expected SYSTEM, CAPABILITY, MACRO_ENV, LOCATION, HOST or PERIMETER); drawn as a capability group.');
+    }
+  }
+
+  for (const e of diagram.edges) {
+    const s = byId.get(e.sourceId);
+    const t = byId.get(e.targetId);
+    if ((s && isCapability(s.kind)) || (t && isCapability(t.kind))) {
+      out.push('Connector "' + (s ? s.label : e.sourceId) + '" -> "' + (t ? t.label : e.targetId) + '" touches a CAPABILITY container; capabilities must have no connectors.');
+    }
+  }
+
+  const a = diagram.archetype;
+  if (a === 'DECOMPOSITION') {
+    for (const n of diagram.nodes) {
+      if (n.isContainer) {
+        if (isCapability(n.kind) && !isSystem(kindOf(n.parentId))) {
+          out.push('Capability "' + n.label + '" must be nested inside a SYSTEM container.');
+        }
+        continue;
+      }
+      if (n.category === 'internal') {
+        if (n.parentId !== null) out.push('Internal tool "' + n.label + '" must sit at the root canvas (parent_container null).');
+        const hasInstance = diagram.edges.some(e => e.targetId === n.id && isSystem(kindOf(e.sourceId)));
+        if (!hasInstance) out.push('Internal tool "' + n.label + '" has no Instance connector from an Enterprise System.');
+      } else if (n.category === 'external') {
+        if (kindOf(n.parentId) !== 'perimeter') out.push('External tool "' + n.label + '" must be inside the PERIMETER container (ext_perimeter).');
+      } else {
+        out.push('Tool "' + n.label + '" has no type of INTERNAL or EXTERNAL.');
+      }
+    }
+  } else if (a === 'DEPLOYMENT') {
+    if (diagram.edges.length > 0) out.push('System Deployment must have no connectors (found ' + diagram.edges.length + ').');
+    for (const n of diagram.nodes) {
+      if (n.isContainer) {
+        if (n.kind === 'location' && !isMacro(kindOf(n.parentId))) out.push('Location "' + n.label + '" must be nested inside a MACRO_ENV container.');
+        if (!childCount.get(n.id)) out.push('Container "' + n.label + '" is empty.');
+      } else if (kindOf(n.parentId) !== 'location') {
+        out.push('Tool "' + n.label + '" must be inside a LOCATION container.');
+      }
+    }
+  } else if (a === 'INFO_FLOW') {
+    for (const n of diagram.nodes) {
+      if (n.isContainer && n.kind === 'host' && !childCount.get(n.id)) out.push('HOST container "' + n.label + '" holds no datastore.');
+      if (!n.isContainer && n.isSoR && kindOf(n.parentId) !== 'host') out.push('System of Record "' + n.label + '" should be nested inside a HOST container.');
+    }
+  } else if (a === 'CONTEXT') {
+    for (const n of diagram.nodes) {
+      if (n.isContainer && !childCount.get(n.id)) out.push('Container "' + n.label + '" is empty.');
+    }
+  }
+  return out;
+}
+
+// failure is set when ELK could not lay the diagram out as requested.
+async function computeLayout(diagram: Diagram, tag: string): Promise<{ layout: any; failure: string | null }> {
   const opts = rootLayoutOptions(diagram);
+  let firstError = '';
   try {
-    return await elk.layout(buildElkGraph(diagram));
+    return { layout: await elk.layout(buildElkGraph(diagram)), failure: null };
   } catch (err) {
+    firstError = shortError(err);
     console.error(
       tag + ' ELK layout failed (algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length +
       ', edges=' + diagram.edges.length + '): ' + describeError(err)
     );
   }
+  let retryError = '';
   try {
     const graph = buildElkGraph(diagram);
     graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT' };
-    return await elk.layout(graph);
+    return { layout: await elk.layout(graph), failure: 'ELK full layout failed (' + firstError + '); a simplified layout was used instead.' };
   } catch (err) {
+    retryError = shortError(err);
     console.error(tag + ' ELK simple retry failed; using grid layout: ' + describeError(err));
   }
-  return gridLayout(diagram);
+  return {
+    layout: gridLayout(diagram),
+    failure: 'ELK failed, so a flat grid with no nesting was used. Full layout: ' + firstError + ' | Simple retry: ' + retryError
+  };
 }
 
-async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void> {
+function addIssuesNote(page: PageProxy, issues: string[]): void {
+  const MAX = 14;
+  const shown = issues.slice(0, MAX).map(i => '- ' + i);
+  if (issues.length > MAX) shown.push('... and ' + (issues.length - MAX) + ' more (see the browser console).');
+  const h = 60 + shown.length * 34;
+  trySet('render issues note', () => {
+    const note = page.addBlock({
+      className: FALLBACK_CLASS,
+      boundingBox: { x: CANVAS_MARGIN, y: 60 - h, w: 1100, h },
+      fillStyle: '#fde8e8'
+    });
+    setLabel(note, 'RENDER ISSUES (' + issues.length + ')\n' + shown.join('\n'));
+    note.properties.set('LineColor', '#D0021B');
+    note.properties.set('LineWidth', 3);
+  });
+}
+
+async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<string[]> {
   const tag = '[' + rawDiagram.pageTitle + ']';
+  const issues: string[] = [];
   const diagram = await stage(tag, 'validate', () => sanitizeDiagram(rawDiagram));
   const nodeById = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
+  issues.push(...checkStandards(rawDiagram));
 
-  const layout = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
+  const { layout, failure } = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
+  if (failure) issues.unshift(failure);
   const placed: Placed[] = [];
   flattenLayout(layout, 0, 0, nodeById, placed);
+  if (placed.length < diagram.nodes.length) {
+    issues.push('Layout positioned ' + placed.length + ' of ' + diagram.nodes.length + ' items.');
+  }
 
   const classFor = new Map<string, string>();
   const wanted = new Set<string>([FALLBACK_CLASS]);
-  const unmappedGcp = new Set<string>();
   const inferred: string[] = [];
   for (const p of placed) {
     let className: string;
@@ -453,7 +625,9 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void
       } else {
         className = inferToolClass(p.node);
         inferred.push(toolName(p.node) + ' -> ' + className);
-        if (looksLikeGcp(p.node)) unmappedGcp.add(toolName(p.node));
+        if (looksLikeGcp(p.node)) {
+          issues.push('GCP tool "' + p.node.label + '" (technology "' + toolName(p.node) + '") has no GCP 2021 icon mapping; drawn as a generic ' + className.replace('GCP2021Container', '') + ' shape.');
+        }
       }
     }
     classFor.set(p.node.id, className);
@@ -462,6 +636,10 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void
 
   const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
   const failedClasses = Array.from(wanted).filter(c => !available.has(c));
+  for (const cls of failedClasses) {
+    const users = placed.filter(p => classFor.get(p.node.id) === cls).map(p => p.node.label);
+    issues.push('Shape class "' + cls + '" failed to load, so ' + (users.length > 0 ? users.length + ' shape(s) (' + users.slice(0, 3).join(', ') + (users.length > 3 ? ', ...' : '') + ')' : 'its shapes') + ' use a plain box.');
+  }
 
   const blocks = new Map<string, BlockProxy>();
   let blocksSkipped = 0;
@@ -470,25 +648,21 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void
       const preferred = classFor.get(p.node.id) || FALLBACK_CLASS;
       const className = available.has(preferred) ? preferred : FALLBACK_CLASS;
       try {
-        blocks.set(p.node.id, createBlock(page, p, className));
+        blocks.set(p.node.id, createBlock(page, p, className, issues));
       } catch (err) {
         console.warn(tag + ' block ' + p.node.id + ' ("' + p.node.label + '") failed with class ' + className + ': ' + describeError(err));
+        issues.push('Shape "' + p.node.label + '" could not be created with class ' + className + ' (' + shortError(err) + '); retried as a plain box.');
         try {
-          blocks.set(p.node.id, createBlock(page, p, FALLBACK_CLASS));
+          blocks.set(p.node.id, createBlock(page, p, FALLBACK_CLASS, issues));
         } catch (err2) {
           blocksSkipped++;
           console.error(tag + ' block ' + p.node.id + ' skipped, fallback also failed: ' + describeError(err2));
+          issues.push('Shape "' + p.node.label + '" was skipped; the plain box also failed (' + shortError(err2) + ').');
         }
       }
     }
   });
 
-  if (unmappedGcp.size > 0) {
-    console.warn(tag + ' GCP tools missing from GCP_CLASS_MAP (drawn with an inferred shape):', Array.from(unmappedGcp));
-  }
-  if (failedClasses.length > 0) {
-    console.warn(tag + ' classes failed to load (check the class names):', failedClasses);
-  }
   if (inferred.length > 0) {
     console.info(tag + ' tools without a GCP icon, drawn with an inferred shape:', inferred);
   }
@@ -499,20 +673,25 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void
     for (const edge of diagram.edges) {
       const source = blocks.get(edge.sourceId);
       const target = blocks.get(edge.targetId);
-      if (source && target && createLine(page, source, target, edge)) {
+      const a = placed.find(p => p.node.id === edge.sourceId);
+      const b = placed.find(p => p.node.id === edge.targetId);
+      if (source && target && a && b && createLine(page, source, target, edge, facingLinks(a, b))) {
         linesCreated++;
       } else {
         linesSkipped++;
+        issues.push('Connector "' + (nodeById.get(edge.sourceId)?.label || edge.sourceId) + '" -> "' + (nodeById.get(edge.targetId)?.label || edge.targetId) + '" was not drawn.');
       }
     }
   });
 
+  if (issues.length > 0) addIssuesNote(page, issues);
+
   console.info(
     tag + ' done: blocks ' + blocks.size + ' created/' + blocksSkipped + ' skipped, lines ' +
-    linesCreated + ' created/' + linesSkipped + ' skipped'
+    linesCreated + ' created/' + linesSkipped + ' skipped, issues ' + issues.length
   );
+  return issues;
 }
-
 function parsePayload(data: unknown): BootstrapPayload | null {
   const raw = (data as any)?.csaPayload;
   if (!raw) return null;
@@ -546,18 +725,40 @@ client.processAndClearBootstrapData(async data => {
   );
 
   let rendered = 0;
+  const problems: string[] = [];
   for (const diagram of payload.diagrams) {
     const page = pagesByTitle.get(diagram.pageTitle);
     if (!page) {
       console.warn('No page titled "' + diagram.pageTitle + '"; skipping diagram.');
+      problems.push(diagram.pageTitle + ': no matching page in the document; diagram skipped.');
       continue;
     }
     try {
-      await renderDiagram(page, diagram);
+      const issues = await renderDiagram(page, diagram);
+      if (issues.length > 0) {
+        problems.push(
+          diagram.pageTitle + ' (' + issues.length + '):\n  - ' + issues.slice(0, 5).join('\n  - ') +
+          (issues.length > 5 ? '\n  - ... ' + (issues.length - 5) + ' more, listed in the red note on the page' : '')
+        );
+      }
       rendered++;
     } catch (err) {
       console.error('Failed to render "' + diagram.pageTitle + '": ' + describeError(err));
+      problems.push(diagram.pageTitle + ': render failed: ' + shortError(err));
     }
   }
   console.info('Rendered ' + rendered + '/' + payload.diagrams.length + ' diagrams.');
+
+  if (problems.length > 0) {
+    const alertFn = (client as any).alert;
+    if (typeof alertFn === 'function') {
+      try {
+        await alertFn.call(client, 'CSA renderer found problems on ' + problems.length + ' slide(s):\n\n' + problems.join('\n\n'));
+      } catch (err) {
+        console.warn('Could not show alert: ' + describeError(err));
+      }
+    } else {
+      console.warn('client.alert is unavailable; problems were only written to the page notes and console.');
+    }
+  }
 }, true);
