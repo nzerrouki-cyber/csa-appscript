@@ -42,6 +42,92 @@ interface BootstrapPayload {
   diagrams: Diagram[];
 }
 
+function describeError(err: unknown): string {
+  try {
+    if (err instanceof Error) return err.name + ': ' + err.message + (err.stack ? '\n' + err.stack : '');
+    if (typeof err === 'string') return err;
+    return JSON.stringify(err, Object.getOwnPropertyNames(Object(err)));
+  } catch {
+    return String(err);
+  }
+}
+
+async function stage<T>(tag: string, name: string, fn: () => T | Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw new Error(tag + ' stage=' + name + ': ' + describeError(err));
+  }
+}
+
+// Drops/repairs bad nodes and edges so one malformed record cannot abort the whole slide.
+function sanitizeDiagram(diagram: Diagram): Diagram {
+  const tag = '[' + diagram.pageTitle + ']';
+  const seen = new Set<string>();
+  const nodes: GraphNode[] = [];
+  for (const raw of diagram.nodes || []) {
+    if (!raw || raw.id === undefined || raw.id === null || raw.id === '') {
+      console.warn(tag + ' dropping node with missing id:', JSON.stringify(raw));
+      continue;
+    }
+    const id = String(raw.id);
+    if (id === 'root' || seen.has(id)) {
+      console.warn(tag + ' dropping node with duplicate/reserved id: ' + id);
+      continue;
+    }
+    seen.add(id);
+    nodes.push({
+      ...raw,
+      id,
+      label: String(raw.label === undefined || raw.label === null ? '' : raw.label),
+      kind: String(raw.kind || ''),
+      deltaFlag: String(raw.deltaFlag || ''),
+      category: String(raw.category || ''),
+      parentId: raw.parentId === undefined || raw.parentId === null ? null : String(raw.parentId)
+    });
+  }
+
+  const byId = new Map(nodes.map(n => [n.id, n] as [string, GraphNode]));
+  for (const n of nodes) {
+    if (n.parentId !== null && (n.parentId === n.id || !byId.has(n.parentId))) {
+      console.warn(tag + ' node ' + n.id + ' has missing/self parent "' + n.parentId + '"; moving to top level.');
+      n.parentId = null;
+    }
+  }
+  for (const n of nodes) {
+    const chain = new Set<string>([n.id]);
+    let cur = n.parentId;
+    while (cur !== null) {
+      if (chain.has(cur)) {
+        console.warn(tag + ' parent cycle at node ' + n.id + '; moving to top level.');
+        n.parentId = null;
+        break;
+      }
+      chain.add(cur);
+      cur = byId.get(cur)?.parentId ?? null;
+    }
+  }
+
+  const edgeIds = new Set<string>();
+  const edges: GraphEdge[] = [];
+  (diagram.edges || []).forEach((raw, i) => {
+    const sourceId = String(raw?.sourceId);
+    const targetId = String(raw?.targetId);
+    if (!byId.has(sourceId) || !byId.has(targetId)) {
+      console.warn(tag + ' dropping edge ' + raw?.id + ' with unknown endpoint(s): ' + sourceId + ' -> ' + targetId);
+      return;
+    }
+    let id = raw.id === undefined || raw.id === null || raw.id === '' ? 'edge_' + i : String(raw.id);
+    if (edgeIds.has(id) || byId.has(id) || id === 'root') {
+      id = id + '__' + i;
+    }
+    edgeIds.add(id);
+    edges.push({ ...raw, id, sourceId, targetId, label: String(raw.label || ''), bidirectional: !!raw.bidirectional });
+  });
+
+  return { ...diagram, nodes, edges };
+}
+
 // Class names from https://developer.lucid.co/docs/gcp-2021-library, keyed by normalizeTool().
 // To support a new tool, add its normalized name here (see the "missing from GCP_CLASS_MAP" log).
 const GCP_CLASS_MAP: { [tool: string]: string } = {
@@ -138,8 +224,8 @@ function inferToolClass(node: GraphNode): string {
 }
 
 function nodeSize(node: GraphNode): { w: number; h: number } {
-  const lines = node.label.split('\n');
-  const longest = Math.max(...lines.map(l => l.length));
+  const lines = String(node.label || '').split('\n');
+  const longest = Math.max(0, ...lines.map(l => l.length));
   return {
     w: Math.min(260, Math.max(140, longest * 7 + 40)),
     h: Math.max(100, lines.length * 18 + 70)
@@ -229,7 +315,7 @@ async function loadClasses(classNames: string[]): Promise<Set<string>> {
       await client.loadBlockClasses([className]);
       available.add(className);
     } catch (err) {
-      console.warn('Block class unavailable, using fallback:', className, err);
+      console.warn('Block class unavailable, using fallback: ' + className + ' -> ' + describeError(err));
     }
   }
   return available;
@@ -239,7 +325,7 @@ function trySet(label: string, fn: () => void): void {
   try {
     fn();
   } catch (err) {
-    console.warn('Could not set ' + label + ':', err);
+    console.warn('Could not set ' + label + ': ' + describeError(err));
   }
 }
 
@@ -262,7 +348,7 @@ function createBlock(page: PageProxy, placed: Placed, className: string): BlockP
   return block;
 }
 
-function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge): void {
+function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge): boolean {
   const endpoint = (block: BlockProxy, style?: string) => ({
     connection: block,
     linkX: 0.5,
@@ -271,26 +357,68 @@ function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edg
     ...(style ? { style } : {})
   });
 
-  let line;
-  try {
-    line = page.addLine({
+  const attempts: Array<[string, () => any]> = [
+    ['styled', () => page.addLine({
       endpoint1: endpoint(source, edge.bidirectional ? 'Arrow' : undefined),
       endpoint2: endpoint(target, 'Arrow')
-    });
-  } catch (err) {
-    console.warn('Styled line failed, retrying without arrow styles:', err);
-    line = page.addLine({ endpoint1: endpoint(source), endpoint2: endpoint(target) });
+    })],
+    ['unstyled', () => page.addLine({ endpoint1: endpoint(source), endpoint2: endpoint(target) })],
+    ['bare', () => page.addLine({ endpoint1: { connection: source }, endpoint2: { connection: target } } as any)]
+  ];
+
+  let line: any;
+  for (const [name, attempt] of attempts) {
+    try {
+      line = attempt();
+      break;
+    } catch (err) {
+      console.warn('Line ' + edge.id + ' (' + edge.sourceId + ' -> ' + edge.targetId + ') ' + name + ' attempt failed: ' + describeError(err));
+    }
   }
+  if (!line) return false;
 
   if (edge.label) {
     trySet('line label', () => line.textAreas.set('Text', edge.label));
   }
+  return true;
 }
 
-async function renderDiagram(page: PageProxy, diagram: Diagram): Promise<void> {
+function gridLayout(diagram: Diagram): any {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(diagram.nodes.length)));
+  return {
+    children: diagram.nodes.map((n, i) => {
+      const size = n.isContainer ? { w: 260, h: 140 } : nodeSize(n);
+      return { id: n.id, x: (i % cols) * 320, y: Math.floor(i / cols) * 200, width: size.w, height: size.h };
+    })
+  };
+}
+
+async function computeLayout(diagram: Diagram, tag: string): Promise<any> {
+  const opts = rootLayoutOptions(diagram);
+  try {
+    return await elk.layout(buildElkGraph(diagram));
+  } catch (err) {
+    console.error(
+      tag + ' ELK layout failed (algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length +
+      ', edges=' + diagram.edges.length + '): ' + describeError(err)
+    );
+  }
+  try {
+    const graph = buildElkGraph(diagram);
+    graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT' };
+    return await elk.layout(graph);
+  } catch (err) {
+    console.error(tag + ' ELK simple retry failed; using grid layout: ' + describeError(err));
+  }
+  return gridLayout(diagram);
+}
+
+async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<void> {
+  const tag = '[' + rawDiagram.pageTitle + ']';
+  const diagram = await stage(tag, 'validate', () => sanitizeDiagram(rawDiagram));
   const nodeById = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
 
-  const layout = await elk.layout(buildElkGraph(diagram));
+  const layout = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
   const placed: Placed[] = [];
   flattenLayout(layout, 0, 0, nodeById, placed);
 
@@ -316,17 +444,29 @@ async function renderDiagram(page: PageProxy, diagram: Diagram): Promise<void> {
     wanted.add(className);
   }
 
-  const available = await loadClasses(Array.from(wanted));
+  const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
   const failedClasses = Array.from(wanted).filter(c => !available.has(c));
 
   const blocks = new Map<string, BlockProxy>();
-  for (const p of placed) {
-    const preferred = classFor.get(p.node.id) || FALLBACK_CLASS;
-    const className = available.has(preferred) ? preferred : FALLBACK_CLASS;
-    blocks.set(p.node.id, createBlock(page, p, className));
-  }
+  let blocksSkipped = 0;
+  await stage(tag, 'create-blocks', () => {
+    for (const p of placed) {
+      const preferred = classFor.get(p.node.id) || FALLBACK_CLASS;
+      const className = available.has(preferred) ? preferred : FALLBACK_CLASS;
+      try {
+        blocks.set(p.node.id, createBlock(page, p, className));
+      } catch (err) {
+        console.warn(tag + ' block ' + p.node.id + ' ("' + p.node.label + '") failed with class ' + className + ': ' + describeError(err));
+        try {
+          blocks.set(p.node.id, createBlock(page, p, FALLBACK_CLASS));
+        } catch (err2) {
+          blocksSkipped++;
+          console.error(tag + ' block ' + p.node.id + ' skipped, fallback also failed: ' + describeError(err2));
+        }
+      }
+    }
+  });
 
-  const tag = '[' + diagram.pageTitle + ']';
   if (unmappedGcp.size > 0) {
     console.warn(tag + ' GCP tools missing from GCP_CLASS_MAP (drawn with an inferred shape):', Array.from(unmappedGcp));
   }
@@ -337,13 +477,24 @@ async function renderDiagram(page: PageProxy, diagram: Diagram): Promise<void> {
     console.info(tag + ' tools without a GCP icon, drawn with an inferred shape:', inferred);
   }
 
-  for (const edge of diagram.edges) {
-    const source = blocks.get(edge.sourceId);
-    const target = blocks.get(edge.targetId);
-    if (source && target) {
-      createLine(page, source, target, edge);
+  let linesCreated = 0;
+  let linesSkipped = 0;
+  await stage(tag, 'create-lines', () => {
+    for (const edge of diagram.edges) {
+      const source = blocks.get(edge.sourceId);
+      const target = blocks.get(edge.targetId);
+      if (source && target && createLine(page, source, target, edge)) {
+        linesCreated++;
+      } else {
+        linesSkipped++;
+      }
     }
-  }
+  });
+
+  console.info(
+    tag + ' done: blocks ' + blocks.size + ' created/' + blocksSkipped + ' skipped, lines ' +
+    linesCreated + ' created/' + linesSkipped + ' skipped'
+  );
 }
 
 function parsePayload(data: unknown): BootstrapPayload | null {
@@ -373,6 +524,12 @@ client.processAndClearBootstrapData(async data => {
     pagesByTitle.set(page.getTitle(), page);
   }
 
+  console.info(
+    'CSA payload: ' + payload.diagrams.length + ' diagram(s) [' + payload.diagrams.map(d => d.pageTitle).join(' | ') +
+    ']; document pages [' + Array.from(pagesByTitle.keys()).join(' | ') + ']'
+  );
+
+  let rendered = 0;
   for (const diagram of payload.diagrams) {
     const page = pagesByTitle.get(diagram.pageTitle);
     if (!page) {
@@ -381,8 +538,10 @@ client.processAndClearBootstrapData(async data => {
     }
     try {
       await renderDiagram(page, diagram);
+      rendered++;
     } catch (err) {
-      console.error('Failed to render "' + diagram.pageTitle + '":', err);
+      console.error('Failed to render "' + diagram.pageTitle + '": ' + describeError(err));
     }
   }
+  console.info('Rendered ' + rendered + '/' + payload.diagrams.length + ' diagrams.');
 }, true);
