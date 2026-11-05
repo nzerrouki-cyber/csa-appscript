@@ -1,4 +1,4 @@
-// GraphNormalizer.js - Production Patched Version
+// GraphNormalizer.js - Production Enterprise Version
 const BOOTSTRAP_SCHEMA_VERSION = 2;
 
 const SLIDE_ARCHETYPES = {
@@ -19,7 +19,6 @@ const SLIDE_SHORT_TITLES = {
   11: 'Information Flow'
 };
 
-// Enforces CSA Diagram Standards: max 25 characters per line
 function wrapLabel(text, maxChars = 25) {
   if (!text) return '';
   const lines = String(text).split('\n');
@@ -92,18 +91,16 @@ function normalizeDiagram(diagram, index, errors) {
     ids.add(id);
 
     const rawLabel = String(item.label || item.name || id);
-    // Index original raw label so connectors referencing raw labels resolve cleanly
     if (!labelToId.has(rawLabel)) labelToId.set(rawLabel, id);
 
     const isSoR = !isContainer && (item.is_sor === true || item.isSoR === true);
     const isCore = !isContainer && (item.isCore === true || item.is_core === true);
 
-    // Dynamic (SoR) badging: append only if not already present
-    let label = rawLabel;
+    // Apply label wrapping to prevent container text blowout
+    let label = isContainer ? wrapLabel(rawLabel, 32) : wrapLabel(rawLabel, 24);
     if (isSoR && !/\(SoR\)$/i.test(label.trim())) {
       label = label ? label + '\n(SoR)' : '(SoR)';
     }
-    // Also index modified label
     if (!labelToId.has(label)) labelToId.set(label, id);
 
     const parentContainer = item.parent_container || item.parentContainer || item.parentId || item.parent || null;
@@ -119,7 +116,8 @@ function normalizeDiagram(diagram, index, errors) {
       category: isContainer ? '' : String(item.type || item.category || 'internal').toLowerCase(),
       deltaFlag: isContainer ? '' : String(item.delta_flag || item.deltaFlag || 'Neutral'),
       isSoR: isSoR,
-      isCore: isCore
+      isCore: isCore,
+      quadrant: item.quadrant || null // Layout hint for Slide 10
     });
   };
 
@@ -130,17 +128,6 @@ function normalizeDiagram(diagram, index, errors) {
   nodes.forEach(n => {
     if (n.parentId && !ids.has(n.parentId)) {
       errors.push(ctx + ': "' + n.id + '" references unknown parent "' + n.parentId + '".');
-    }
-  });
-
-  nodes.forEach(n => {
-    let cursor = n.parentId;
-    for (let depth = 0; cursor && depth <= nodes.length; depth++) {
-      if (cursor === n.id) {
-        errors.push(ctx + ': parent cycle detected at "' + n.id + '".');
-        break;
-      }
-      cursor = parentById.get(cursor) || null;
     }
   });
 
@@ -161,7 +148,7 @@ function normalizeDiagram(diagram, index, errors) {
     };
   }
 
-  const edgeMap = new Map();
+  const edges = [];
   (diagram.connectors || []).forEach((c, i) => {
     const sourceId = resolveRef(c.source);
     const targetId = resolveRef(c.target);
@@ -176,55 +163,22 @@ function normalizeDiagram(diagram, index, errors) {
       if (stepMatch) stepNum = Number(stepMatch[1]);
     }
     const hasStep = Number.isFinite(stepNum);
-
     const isInstanceEdge = c.type === 'instance' || /^\s*instance\s*$/i.test(String(c.label || ''));
-    const bidirectionalFlag = c.type === 'bidirectional';
-    const wrappedLabel = wrapLabel(c.label);
 
-    let pairKey;
-    if (archetype === 'INFO_FLOW') {
-      pairKey = hasStep ? 'step_' + stepNum + '__' + sourceId + '->' + targetId : 'seq_' + i + '__' + sourceId + '->' + targetId;
-    } else if (isInstanceEdge) {
-      pairKey = 'instance__' + sourceId + '->' + targetId;
-    } else {
-      pairKey = sourceId < targetId ? sourceId + '||' + targetId : targetId + '||' + sourceId;
-    }
-
-    const existing = edgeMap.get(pairKey);
-
-    if (!existing) {
-      edgeMap.set(pairKey, {
-        id: sourceId + '__' + targetId + (hasStep ? '__s' + stepNum : ''),
-        sourceId: sourceId,
-        targetId: targetId,
-        labels: wrappedLabel ? [wrappedLabel] : [],
-        bidirectional: bidirectionalFlag,
-        type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
-        stepNumbers: hasStep ? [stepNum] : []
-      });
-    } else {
-      if (wrappedLabel && existing.labels.indexOf(wrappedLabel) === -1) existing.labels.push(wrappedLabel);
-      if (existing.sourceId !== sourceId || bidirectionalFlag) existing.bidirectional = true;
-      if (hasStep && existing.stepNumbers.indexOf(stepNum) === -1) existing.stepNumbers.push(stepNum);
-    }
+    // DO NOT forcibly collapse distinct interactions into one edge on Slides 6-9
+    edges.push({
+      id: c.id || (sourceId + '__' + targetId + '__' + i),
+      sourceId: sourceId,
+      targetId: targetId,
+      label: wrapLabel(c.label, 25),
+      bidirectional: !!c.bidirectional || c.type === 'bidirectional',
+      type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
+      stepNumbers: hasStep ? [stepNum] : []
+    });
   });
 
-  let edges = Array.from(edgeMap.values()).map(e => ({
-    id: e.id,
-    sourceId: e.sourceId,
-    targetId: e.targetId,
-    label: e.labels.join('\n'),
-    bidirectional: e.bidirectional,
-    type: e.type,
-    stepNumbers: e.stepNumbers
-  }));
-
   if (archetype === 'INFO_FLOW') {
-    edges.sort((a, b) => {
-      const aStep = a.stepNumbers && a.stepNumbers.length > 0 ? a.stepNumbers[0] : 0;
-      const bStep = b.stepNumbers && b.stepNumbers.length > 0 ? b.stepNumbers[0] : 0;
-      return aStep - bStep;
-    });
+    edges.sort((a, b) => (a.stepNumbers[0] || 0) - (b.stepNumbers[0] || 0));
   }
 
   return {

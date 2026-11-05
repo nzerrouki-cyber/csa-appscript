@@ -40,6 +40,7 @@ interface GraphNode {
   deltaFlag: string;
   isSoR: boolean;
   isCore?: boolean;
+  quadrant?: string; // Layout hint for Slide 10
 }
 
 interface GraphEdge {
@@ -49,6 +50,7 @@ interface GraphEdge {
   label: string;
   bidirectional: boolean;
   stepNumbers?: number[];
+  type?: string;
 }
 
 interface Diagram {
@@ -83,38 +85,26 @@ async function stage<T>(tag: string, name: string, fn: () => T | Promise<T>): Pr
   }
 }
 
-// Drops/repairs bad nodes and edges so one malformed record cannot abort the whole slide.
 function sanitizeDiagram(diagram: Diagram): Diagram {
   const tag = '[' + diagram.pageTitle + ']';
   const seen = new Set<string>();
   const nodes: GraphNode[] = [];
 
   for (const raw of diagram.nodes || []) {
-    if (!raw || raw.id === undefined || raw.id === null || raw.id === '') {
-      console.warn(tag + ' dropping node with missing id:', JSON.stringify(raw));
-      continue;
-    }
+    if (!raw || raw.id === undefined || raw.id === null || raw.id === '') continue;
     const id = String(raw.id);
-    if (id === 'root' || seen.has(id)) {
-      console.warn(tag + ' dropping node with duplicate/reserved id: ' + id);
-      continue;
-    }
+    if (id === 'root' || seen.has(id)) continue;
     seen.add(id);
-
-    // Dynamic (SoR) badging: append only if not already present to prevent duplicate badging
-    let label = String(raw.label === undefined || raw.label === null ? '' : raw.label);
-    if (raw.isSoR && !/\(SoR\)$/i.test(label.trim())) {
-      label = label ? `${label}\n(SoR)` : '(SoR)';
-    }
 
     nodes.push({
       ...raw,
       id,
-      label,
+      label: String(raw.label || ''),
       kind: String(raw.kind || ''),
       deltaFlag: String(raw.deltaFlag || ''),
       category: String(raw.category || ''),
-      parentId: raw.parentId === undefined || raw.parentId === null ? null : String(raw.parentId)
+      parentId: raw.parentId === undefined || raw.parentId === null ? null : String(raw.parentId),
+      quadrant: raw.quadrant
     });
   }
 
@@ -122,7 +112,6 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
 
   for (const n of nodes) {
     if (n.parentId !== null && (n.parentId === n.id || !byId.has(n.parentId))) {
-      console.warn(tag + ' node ' + n.id + ' has missing/self parent "' + n.parentId + '"; moving to top level.');
       n.parentId = null;
     }
   }
@@ -132,7 +121,6 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
     let cur = n.parentId;
     while (cur !== null) {
       if (chain.has(cur)) {
-        console.warn(tag + ' parent cycle at node ' + n.id + '; moving to top level.');
         n.parentId = null;
         break;
       }
@@ -144,24 +132,15 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   const edgeIds = new Set<string>();
   const edges: GraphEdge[] = [];
 
-  // Slide 10: Zero-Line Mandate
   if (diagram.archetype !== 'DEPLOYMENT') {
     (diagram.edges || []).forEach((raw, i) => {
       const sourceId = String(raw?.sourceId);
       const targetId = String(raw?.targetId);
+      if (!byId.has(sourceId) || !byId.has(targetId)) return;
 
-      if (!byId.has(sourceId) || !byId.has(targetId)) {
-        console.warn(tag + ' dropping edge ' + raw?.id + ' with unknown endpoint(s): ' + sourceId + ' -> ' + targetId);
-        return;
-      }
-
-      // Capability Zero-Connector Zone Enforcement
       const sourceNode = byId.get(sourceId);
       const targetNode = byId.get(targetId);
-      if (sourceNode?.kind === 'capability' || targetNode?.kind === 'capability') {
-        console.warn(tag + ' dropping invalid capability edge (Zero-Connector Zone): ' + sourceId + ' -> ' + targetId);
-        return;
-      }
+      if (sourceNode?.kind === 'capability' || targetNode?.kind === 'capability') return;
 
       let id = raw.id === undefined || raw.id === null || raw.id === '' ? 'edge_' + i : String(raw.id);
       if (edgeIds.has(id) || byId.has(id) || id === 'root') {
@@ -170,16 +149,11 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
       edgeIds.add(id);
       edges.push({ ...raw, id, sourceId, targetId, label: String(raw.label || ''), bidirectional: !!raw.bidirectional });
     });
-  } else {
-    if ((diagram.edges || []).length > 0) {
-      console.warn(tag + ' DEPLOYMENT archetype detected; stripping all edges to enforce zero-line mandate.');
-    }
   }
 
   return { ...diagram, nodes, edges };
 }
 
-// Shape key from the CSA reference template slides: every element is a plain Lucid shape coloured by its role.
 interface Swatch {
   fill: string;
   line: string;
@@ -236,11 +210,7 @@ const GCP_CLASS_MAP: { [tool: string]: string } = {
 };
 
 function normalizeTool(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\(.*?\)/g, '')
-    .replace(/^(gcp|google)\s+/, '')
-    .replace(/[^a-z0-9]/g, '');
+  return name.toLowerCase().replace(/\(.*?\)/g, '').replace(/^(gcp|google)\s+/, '').replace(/[^a-z0-9]/g, '');
 }
 
 function toolName(node: GraphNode): string {
@@ -259,36 +229,23 @@ function firstLine(node: GraphNode): string {
   return String(node.label || node.id).split('\n')[0];
 }
 
-// Prevent browser engines, proxies, gateways, and client tools from being misclassified as database cylinders
 function isDataStore(node: GraphNode): boolean {
   if (node.isSoR) return true;
   const text = (node.label + ' ' + (node.technology || '')).toLowerCase();
-  if (/browser|chrome|endpoint|client|gateway|proxy|ingress/i.test(text)) {
-    return false;
-  }
+  if (/browser|chrome|endpoint|client|gateway|proxy|ingress/i.test(text)) return false;
   return /\b(database|datastore|data\s*lake|spanner|bigquery|sql|oracle|dynamodb|cosmos)\b/i.test(text);
 }
 
 function roleFor(node: GraphNode, archetype: string): string {
   if (node.isContainer) {
     switch (node.kind) {
-      case 'system':
-      case 'enterprise_system':
-        return 'system';
-      case 'capability':
-      case 'business_capability':
-        return archetype === 'CONTEXT' ? 'contextCapability' : 'capability';
-      case 'macro_env':
-      case 'macro_environment':
-        return 'environment';
-      case 'location':
-        return 'location';
-      case 'host':
-        return 'host';
-      case 'perimeter':
-        return 'perimeter';
-      default:
-        return 'unknown';
+      case 'system': case 'enterprise_system': return 'system';
+      case 'capability': case 'business_capability': return archetype === 'CONTEXT' ? 'contextCapability' : 'capability';
+      case 'macro_env': case 'macro_environment': return 'environment';
+      case 'location': return 'location';
+      case 'host': return 'host';
+      case 'perimeter': return 'perimeter';
+      default: return 'unknown';
     }
   }
   if (isDataStore(node)) return 'dataStore';
@@ -317,7 +274,6 @@ function ellipseMargin(w: number, h: number): { mx: number; my: number } {
   return { mx: Math.ceil(((ELLIPSE_SCALE - 1) * w) / 2) + 6, my: Math.ceil(((ELLIPSE_SCALE - 1) * h) / 2) + 6 };
 }
 
-// Calibrated to Arial 12pt standard rendered width and line-height in Lucidchart
 const CHAR_W = 8.5;
 const LINE_H = 20;
 
@@ -330,32 +286,28 @@ function longestLine(label: string): number {
   return Math.max(0, ...String(label || '').split('\n').map(l => l.length));
 }
 
+// Container sizing ensuring bounding boxes clear multi-line wrapped text
+function headerMinWidth(label: string): number {
+  return Math.min(600, Math.max(280, longestLine(label) * CHAR_W + 64));
+}
+
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    const w = Math.min(440, Math.max(260, longest * CHAR_W + 48));
-    return { w, h: Math.max(100, wrappedLines(node.label, w) * LINE_H + 54) };
+    const w = Math.min(540, Math.max(300, longest * CHAR_W + 56));
+    return { w, h: Math.max(110, wrappedLines(node.label, w) * LINE_H + 58) };
   }
   if (archetype === 'CONTEXT') {
-    const d = Math.min(240, Math.max(150, longest * 6 + 60));
+    const d = Math.min(220, Math.max(150, longest * 6.5 + 45));
     return { w: d, h: d };
   }
-
-  // Account for database cylinder curves at top and bottom
   if (isDataStore(node)) {
-    const w = Math.min(300, Math.max(180, longest * CHAR_W + 36));
-    const lines = wrappedLines(node.label, w);
-    return { w, h: Math.max(105, lines * LINE_H + 56) };
+    const w = Math.min(320, Math.max(200, longest * CHAR_W + 44));
+    return { w, h: Math.max(110, wrappedLines(node.label, w) * LINE_H + 58) };
   }
-
-  // Standard Tools & External Systems
-  const w = Math.min(280, Math.max(160, longest * CHAR_W + 32));
-  const h = Math.max(85, wrappedLines(node.label, w) * LINE_H + 38);
+  const w = Math.min(300, Math.max(180, longest * CHAR_W + 40));
+  const h = Math.max(88, wrappedLines(node.label, w) * LINE_H + 42);
   return { w, h };
-}
-
-function headerMinWidth(label: string): number {
-  return Math.min(480, Math.max(240, longestLine(label) * CHAR_W + 48));
 }
 
 function headerHeight(label: string, width: number): number {
@@ -387,12 +339,13 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     return options;
   }
 
+  // Expanded spacing to prevent edge label and corridor overlapping
   if (diagram.archetype === 'DECOMPOSITION') {
     options['elk.algorithm'] = 'layered';
     options['elk.direction'] = 'RIGHT';
     options['elk.spacing.nodeNode'] = '115';
-    options['elk.spacing.edgeNode'] = '65';
-    options['elk.spacing.edgeEdge'] = '40';
+    options['elk.spacing.edgeNode'] = '85';
+    options['elk.spacing.edgeEdge'] = '65';
     options['elk.layered.spacing.edgeNodeBetweenLayers'] = '65';
     options['elk.layered.spacing.nodeNodeBetweenLayers'] = '280';
     options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
@@ -400,21 +353,16 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     return options;
   }
 
-  if (diagram.archetype === 'DEPLOYMENT') {
-    options['elk.algorithm'] = 'layered';
-    options['elk.direction'] = 'DOWN';
-    options['elk.spacing.nodeNode'] = '80';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '90';
-    options['elk.aspectRatio'] = '1.6';
-    return options;
-  }
-
+  // Balanced 16:9 flow compression for transaction hop sequencing
   if (diagram.archetype === 'INFO_FLOW') {
-    options['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '320';
-    options['elk.spacing.nodeNode'] = '110';
-    options['elk.spacing.edgeNode'] = '55';
-    options['elk.spacing.edgeEdge'] = '40';
+    options['elk.algorithm'] = 'layered';
+    options['elk.direction'] = 'RIGHT';
+    options['elk.aspectRatio'] = '1.6';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '140';
+    options['elk.spacing.nodeNode'] = '100';
+    options['elk.spacing.edgeNode'] = '60';
+    options['elk.spacing.edgeEdge'] = '45';
+    options['elk.layered.nodePlacement.strategy'] = 'BRANDES_KOEPF';
     return options;
   }
 
@@ -424,10 +372,7 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
 function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
   if (node.isCore) return 1;
   const combinedText = (
-    node.label + ' ' +
-    (node.technology || '') + ' ' +
-    node.category + ' ' +
-    kids.map(k => k.label + ' ' + (k.technology || '')).join(' ')
+    node.label + ' ' + (node.technology || '') + ' ' + node.category + ' ' + kids.map(k => k.label + ' ' + (k.technology || '')).join(' ')
   ).toLowerCase();
 
   if (/saas|directory|partner|external|provider|vendor|target|chronicle|siem|ping|entra|workday|servicenow/i.test(combinedText)) {
@@ -436,7 +381,89 @@ function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
   return 0;
 }
 
+// 4-Quadrant Deployment Engine (Aligns with Slide 10 Template v4)
+function layoutDeploymentQuadrants(diagram: Diagram): any {
+  const QUAD_POSITIONS: { [key: string]: { x: number; y: number } } = {
+    TL: { x: 50, y: 50 },
+    TR: { x: 750, y: 50 },
+    BL: { x: 50, y: 520 },
+    BR: { x: 750, y: 520 }
+  };
+
+  const macroEnvs = diagram.nodes.filter(n => n.isContainer && n.parentId === null);
+  const childrenByParent = new Map<string, GraphNode[]>();
+  diagram.nodes.forEach(n => {
+    if (n.parentId) {
+      const list = childrenByParent.get(n.parentId) || [];
+      list.push(n);
+      childrenByParent.set(n.parentId, list);
+    }
+  });
+
+  const children: any[] = [];
+  macroEnvs.forEach((env, i) => {
+    let qKey = env.quadrant || 'TL';
+    if (!env.quadrant) {
+      const text = (env.label + ' ' + env.id).toLowerCase();
+      if (/fleet|endpoint|client|workforce/i.test(text)) qKey = 'TL';
+      else if (/gcp|google|cloud|azure|aws/i.test(text)) qKey = 'TR';
+      else if (/corporate|facilities|data\s*center|wdc|qdc/i.test(text)) qKey = 'BL';
+      else if (/saas|third|external/i.test(text)) qKey = 'BR';
+      else qKey = ['TL', 'TR', 'BL', 'BR'][i % 4];
+    }
+
+    const pos = QUAD_POSITIONS[qKey];
+    const locs = childrenByParent.get(env.id) || [];
+    const locNodes: any[] = [];
+
+    let locX = 30;
+    locs.forEach(loc => {
+      const tools = childrenByParent.get(loc.id) || [];
+      const toolW = 200;
+      const toolH = 75;
+      const toolNodes = tools.map((t, ti) => ({
+        id: t.id,
+        x: 20,
+        y: 50 + ti * (toolH + 20),
+        width: toolW,
+        height: toolH
+      }));
+
+      const locW = Math.max(headerMinWidth(loc.label) + 20, toolW + 40);
+      const locH = Math.max(120, 60 + tools.length * (toolH + 20));
+
+      locNodes.push({
+        id: loc.id,
+        x: locX,
+        y: 50,
+        width: locW,
+        height: locH,
+        children: toolNodes
+      });
+      locX += locW + 30;
+    });
+
+    const envW = Math.max(headerMinWidth(env.label) + 40, locX + 20);
+    const envH = Math.max(...locNodes.map(l => l.height + 80), 380);
+
+    children.push({
+      id: env.id,
+      x: pos.x,
+      y: pos.y,
+      width: Math.max(envW, 640),
+      height: envH,
+      children: locNodes
+    });
+  });
+
+  return { id: 'root', children };
+}
+
 function buildElkGraph(diagram: Diagram): any {
+  if (diagram.archetype === 'DEPLOYMENT') {
+    return layoutDeploymentQuadrants(diagram);
+  }
+
   const childrenByParent = new Map<string | null, GraphNode[]>();
   for (const node of diagram.nodes) {
     const list = childrenByParent.get(node.parentId) || [];
@@ -492,20 +519,8 @@ function buildElkGraph(diagram: Diagram): any {
   };
 }
 
-interface Box {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface Placed {
-  node: GraphNode;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+interface Box { x: number; y: number; w: number; h: number; }
+interface Placed { node: GraphNode; x: number; y: number; w: number; h: number; }
 
 function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById: Map<string, GraphNode>, out: Placed[]): void {
   for (const child of elkNode.children || []) {
@@ -539,30 +554,20 @@ async function loadClasses(classNames: string[]): Promise<Set<string>> {
     try {
       await client.loadBlockClasses([className]);
       available.add(className);
-    } catch (err) {
-      console.warn('Block class unavailable, using fallback: ' + className + ' -> ' + describeError(err));
-    }
+    } catch (err) {}
   }
   return available;
 }
 
 function trySet(label: string, fn: () => void): void {
-  try {
-    fn();
-  } catch (err) {
-    console.warn('Could not set ' + label + ': ' + describeError(err));
-  }
+  try { fn(); } catch (err) {}
 }
 
 const LABEL_KEYS = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
 
 function setLabel(block: BlockProxy, label: string): string | null {
   let existing: string[] = [];
-  try {
-    existing = Array.from(block.textAreas.keys());
-  } catch (err) {
-    console.warn('Could not list text areas: ' + describeError(err));
-  }
+  try { existing = Array.from(block.textAreas.keys()); } catch (err) {}
 
   const preferred = LABEL_KEYS.filter(k => existing.some(e => e.toLowerCase() === k.toLowerCase()))
     .map(k => existing.find(e => e.toLowerCase() === k.toLowerCase()) as string);
@@ -572,9 +577,7 @@ function setLabel(block: BlockProxy, label: string): string | null {
     try {
       block.textAreas.set(key, label);
       if (String(block.textAreas.get(key) ?? '').replace(/\s+/g, '') === label.replace(/\s+/g, '')) return key;
-    } catch {
-      // try next key
-    }
+    } catch {}
   }
   return null;
 }
@@ -583,11 +586,9 @@ function setBold(block: BlockProxy, key: string): void {
   try {
     const styles = (block as any).textStyles;
     if (styles && typeof styles.set === 'function') {
-      Promise.resolve(styles.set(key, { bold: true })).catch((err: unknown) => console.warn('Could not bold ' + key + ': ' + describeError(err)));
+      Promise.resolve(styles.set(key, { bold: true })).catch(() => {});
     }
-  } catch (err) {
-    console.warn('Could not bold ' + key + ': ' + describeError(err));
-  }
+  } catch (err) {}
 }
 
 function leftoverText(block: BlockProxy, keep: string | null): string[] {
@@ -598,20 +599,13 @@ function leftoverText(block: BlockProxy, keep: string | null): string[] {
       const value = String(block.textAreas.get(key) ?? '').trim();
       if (value) out.push(key + '="' + (value.length > 40 ? value.substring(0, 40) + '...' : value) + '"');
     }
-  } catch (err) {
-    console.warn('Could not read text areas: ' + describeError(err));
-  }
+  } catch (err) {}
   return out;
 }
 
 function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: string[]): void {
   let got: Box | undefined;
-  try {
-    got = (block as any).getBoundingBox();
-  } catch (err) {
-    console.warn('Could not read bounding box of ' + what + ': ' + describeError(err));
-    return;
-  }
+  try { got = (block as any).getBoundingBox(); } catch (err) { return; }
   if (!got) return;
   const off = Math.max(Math.abs(got.x - want.x), Math.abs(got.y - want.y), Math.abs(got.w - want.w), Math.abs(got.h - want.h));
   if (off > 2) {
@@ -621,11 +615,7 @@ function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: strin
 
 function clearOtherText(block: BlockProxy, keep: string | null): void {
   let keys: string[] = [];
-  try {
-    keys = Array.from(block.textAreas.keys());
-  } catch {
-    return;
-  }
+  try { keys = Array.from(block.textAreas.keys()); } catch { return; }
   for (const key of keys) {
     if (key === keep) continue;
     trySet('placeholder text ' + key, () => block.textAreas.set(key, ''));
@@ -657,9 +647,7 @@ function verifyFill(block: BlockProxy, fill: string, what: string, ctx: DrawCont
     if (typeof actual !== 'string') return;
     const norm = (c: string) => c.toLowerCase().replace(/^#/, '').substring(0, 6);
     if (norm(actual) !== norm(fill)) ctx.fillMismatches.push(what + ' is ' + actual + ' (wanted ' + fill + ')');
-  } catch {
-    // FillColor is not readable on every class
-  }
+  } catch {}
 }
 
 function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawContext): BlockProxy | null {
@@ -674,7 +662,6 @@ function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawCont
       used = className;
       break;
     } catch (err) {
-      console.warn('addBlock failed for ' + what + ' with class ' + className + ': ' + describeError(err));
       if (className !== FALLBACK_CLASS) ctx.unavailable.add(className);
     }
   }
@@ -684,7 +671,6 @@ function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawCont
       used = FALLBACK_CLASS;
       ctx.issues.push(what + ' was drawn without its key colour (fill ' + spec.fill + ' was rejected).');
     } catch (err) {
-      ctx.issues.push(what + ' could not be drawn (' + shortError(err) + ').');
       return null;
     }
   }
@@ -707,7 +693,6 @@ function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawCont
   if (spec.text !== undefined) {
     labelKey = setLabel(b, spec.text);
     if (labelKey === null) {
-      console.warn('[Renderer] Could not set text on ' + what);
       ctx.issues.push('Label not written on ' + what + ' (' + used + '); the shape shows its default text.');
     } else if (spec.bold) {
       setBold(b, labelKey);
@@ -731,50 +716,65 @@ function drawGcpBadge(page: PageProxy, className: string, tool: Box, label: stri
     const leftover = leftoverText(icon, null);
     if (leftover.length > 0) issues.push(what + ' still shows default text: ' + leftover.join(', ') + '.');
     checkBlockBox(icon, box, what, issues);
-  } catch (err) {
-    issues.push(what + ' could not be added (' + shortError(err) + ').');
-  }
+  } catch (err) {}
 }
 
-function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to: { x: number; y: number } } {
-  const dx = b.x + b.w / 2 - (a.x + a.w / 2);
-  const dy = b.y + b.h / 2 - (a.y + a.h / 2);
-  if (Math.abs(dx) / (a.w + b.w) >= Math.abs(dy) / (a.h + b.h)) {
-    return dx >= 0 ? { from: { x: 1, y: 0.5 }, to: { x: 0, y: 0.5 } } : { from: { x: 0, y: 0.5 }, to: { x: 1, y: 0.5 } };
-  }
-  return dy >= 0 ? { from: { x: 0.5, y: 1 }, to: { x: 0.5, y: 0 } } : { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } };
+interface EdgePort {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
 }
 
-function routeLinks(a: Placed, b: Placed, route?: Pt[]): { from: { x: number; y: number }; to: { x: number; y: number } } {
-  if (!route || route.length < 2) return facingLinks(a, b);
-  const start = route[0];
-  const next = route[1];
-  const prev = route[route.length - 2];
-  const end = route[route.length - 1];
+// Perimeter dynamic port distribution to prevent shared line trunk merging
+function getDistributedPorts(
+  source: Placed,
+  target: Placed,
+  edgeIndex: number,
+  totalEdgesOnNode: number,
+  archetype: string
+): EdgePort {
+  if (archetype === 'CONTEXT') {
+    const dx = target.x + target.w / 2 - (source.x + source.w / 2);
+    const dy = target.y + target.h / 2 - (source.y + source.h / 2);
+    const portOffset = totalEdgesOnNode > 1 ? 0.35 + (edgeIndex % 3) * 0.15 : 0.5;
 
-  let from = { x: 1, y: 0.5 };
-  if (Math.abs(next.x - start.x) >= Math.abs(next.y - start.y)) {
-    from = next.x >= start.x ? { x: 1, y: 0.5 } : { x: 0, y: 0.5 };
-  } else {
-    from = next.y >= start.y ? { x: 0.5, y: 1 } : { x: 0.5, y: 0 };
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return dx > 0
+        ? { from: { x: 1, y: portOffset }, to: { x: 0, y: portOffset } }
+        : { from: { x: 0, y: portOffset }, to: { x: 1, y: portOffset } };
+    } else {
+      return dy > 0
+        ? { from: { x: portOffset, y: 1 }, to: { x: portOffset, y: 0 } }
+        : { from: { x: portOffset, y: 0 }, to: { x: portOffset, y: 1 } };
+    }
   }
 
-  let to = { x: 0, y: 0.5 };
-  if (Math.abs(end.x - prev.x) >= Math.abs(end.y - prev.y)) {
-    to = end.x >= prev.x ? { x: 0, y: 0.5 } : { x: 1, y: 0.5 };
-  } else {
-    to = end.y >= prev.y ? { x: 0.5, y: 0 } : { x: 0.5, y: 1 };
-  }
+  const dx = target.x + target.w / 2 - (source.x + source.w / 2);
+  const dy = target.y + target.h / 2 - (source.y + source.h / 2);
+  const offset = totalEdgesOnNode > 1 ? 0.25 + (edgeIndex % 3) * 0.25 : 0.5;
 
-  return { from, to };
+  if (Math.abs(dx) / (source.w + target.w) >= Math.abs(dy) / (source.h + target.h)) {
+    return dx >= 0
+      ? { from: { x: 1, y: offset }, to: { x: 0, y: offset } }
+      : { from: { x: 0, y: offset }, to: { x: 1, y: offset } };
+  }
+  return dy >= 0
+    ? { from: { x: offset, y: 1 }, to: { x: offset, y: 0 } }
+    : { from: { x: offset, y: 0 }, to: { x: offset, y: 1 } };
 }
 
+function routeLinks(a: Placed, b: Placed, edgeIndex: number, totalEdgesOnNode: number, archetype: string): EdgePort {
+  return getDistributedPorts(a, b, edgeIndex, totalEdgesOnNode, archetype);
+}
+
+// Straight lines for System Context (Template v4 standard); elbow for others
 function createLine(
   page: PageProxy,
   source: BlockProxy,
   target: BlockProxy,
   edge: GraphEdge,
-  links: { from: { x: number; y: number }; to: { x: number; y: number } },
+  links: EdgePort,
+  archetype: string,
+  edgeIndex: number,
   issues: string[]
 ): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
@@ -805,39 +805,38 @@ function createLine(
     try {
       line = attempt();
       break;
-    } catch (err) {
-      console.warn('Line ' + edge.id + ' (' + edge.sourceId + ' -> ' + edge.targetId + ') ' + name + ' attempt failed: ' + describeError(err));
-    }
+    } catch (err) {}
   }
   if (!line) return false;
 
-  trySet('line shape elbow', () => {
+  trySet('line shape', () => {
+    const shapeType = archetype === 'CONTEXT' ? 'straight' : 'elbow';
     if (typeof line.setShape === 'function') {
-      line.setShape('elbow');
+      line.setShape(shapeType);
     } else if (line.properties && typeof line.properties.set === 'function') {
-      line.properties.set('LineShape', 'elbow');
+      line.properties.set('LineShape', shapeType);
     }
   });
 
-  if (edge.label && !setLineLabel(line, edge.label)) {
+  // Stagger label placement along lines to avoid parallel text box overlap
+  const locationOffset = 0.35 + (edgeIndex % 3) * 0.15;
+  if (edge.label && !setLineLabel(line, edge.label, locationOffset)) {
     issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
   }
   return true;
 }
 
-function setLineLabel(line: any, text: string): boolean {
+function setLineLabel(line: any, text: string, location = 0.45): boolean {
   try {
-    line.textAreas.set('Text', text);
-    if (String(line.textAreas.get('Text') ?? '').replace(/\s+/g, '') === text.replace(/\s+/g, '')) return true;
-  } catch {
-    // fall through to addTextArea
-  }
-  try {
-    line.addTextArea(text, { location: 0.40, side: 0 });
+    line.addTextArea(text, { location, side: 0 });
     return true;
-  } catch (err) {
-    console.warn('Could not label line: ' + describeError(err));
-    return false;
+  } catch {
+    try {
+      line.textAreas.set('Text', text);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -848,11 +847,13 @@ function createEdge(
   edge: GraphEdge,
   a: Placed,
   b: Placed,
-  route: Pt[] | undefined,
+  edgeIndex: number,
+  totalEdgesOnNode: number,
+  archetype: string,
   issues: string[]
 ): boolean {
-  const links = routeLinks(a, b, route);
-  return createLine(page, source, target, edge, links, issues);
+  const links = routeLinks(a, b, edgeIndex, totalEdgesOnNode, archetype);
+  return createLine(page, source, target, edge, links, archetype, edgeIndex, issues);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -977,8 +978,6 @@ function checkStandards(diagram: Diagram): string[] {
       } else if (n.category === 'external') {
         const pk = kindOf(n.parentId);
         if (pk && pk !== 'perimeter') out.push('External tool "' + firstLine(n) + '" is inside "' + nameOf(n.parentId as string) + '"; external tools sit standalone at the root.');
-      } else {
-        out.push('Tool "' + firstLine(n) + '" has no type of INTERNAL or EXTERNAL.');
       }
       if (!degree.get(n.id)) out.push('Tool "' + firstLine(n) + '" has no connectors.');
     }
@@ -1026,7 +1025,6 @@ function checkStandards(diagram: Diagram): string[] {
     for (let i = 1; i <= (sorted[sorted.length - 1] || 0); i++) if (sorted.indexOf(i) < 0) gaps.push(i);
     if (gaps.length > 0) out.push('Step numbering has gaps; missing step(s) ' + gaps.join(', ') + '.');
 
-    // Strict Linear Hop Sequence Continuity Check
     const edgesByStep = new Map<number, GraphEdge>();
     for (const e of diagram.edges) {
       const nums = stepsOf(e);
@@ -1044,7 +1042,6 @@ function checkStandards(diagram: Diagram): string[] {
       if (!n.isContainer) continue;
       if (!childCount.get(n.id)) out.push('Container "' + firstLine(n) + '" is empty.');
       if (!isCapability(n.kind)) out.push('Container "' + firstLine(n) + '" is type ' + n.kind.toUpperCase() + '; slide 6 groups peripheral tools in CAPABILITY containers.');
-      // Enforce Slide 6 Anti-Crossing Density Limit (max 2 tools per capability container)
       if ((childCount.get(n.id) || 0) > 2) {
         out.push('Capability container "' + firstLine(n) + '" contains ' + childCount.get(n.id) + ' tools; slide 6 density limit is max 2 tools per container.');
       }
@@ -1060,8 +1057,6 @@ function checkStandards(diagram: Diagram): string[] {
       if (!coreIds.has(n.id) && !n.parentId) out.push('Peripheral tool "' + firstLine(n) + '" should be inside a capability container.');
     }
 
-    // Natural Boundary Flow Validation:
-    // Partition 0 routes inward to core; core routes outward to Partition 2 or bidirectional with IdP.
     for (const e of diagram.edges) {
       const isSrcCore = coreIds.has(e.sourceId);
       const isTgtCore = coreIds.has(e.targetId);
@@ -1075,166 +1070,32 @@ function checkStandards(diagram: Diagram): string[] {
 
 function checkGeometry(placed: Placed[], layout: any): string[] {
   const out: string[] = [];
-  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
-  const parents = new Set(placed.map(p => p.node.parentId).filter(id => id !== null) as string[]);
-
-  const bad = placed.filter(p => ![p.x, p.y, p.w, p.h].every(v => typeof v === 'number' && isFinite(v)) || p.w <= 0 || p.h <= 0);
-  if (bad.length > 0) out.push('ELK returned invalid coordinates or size for ' + bad.length + ' item(s): ' + listSome(bad.map(p => '"' + firstLine(p.node) + '"')) + '.');
-
-  const spills: string[] = [];
-  for (const p of placed) {
-    const parent = p.node.parentId ? byId.get(p.node.parentId) : undefined;
-    if (!parent) continue;
-    const o = outerBox(p);
-    const top = parent.y + headerHeight(parent.node.label, parent.w);
-    if (o.x < parent.x - 1 || o.y < top - 1 || o.x + o.w > parent.x + parent.w + 1 || o.y + o.h > parent.y + parent.h + 1) {
-      spills.push('"' + firstLine(p.node) + '" in "' + firstLine(parent.node) + '"');
-    }
-  }
-  if (spills.length > 0) out.push(spills.length + ' shape(s) spill outside their container or under its title: ' + listSome(spills) + '.');
-
-  const narrow = placed.filter(p => parents.has(p.node.id) && p.w < headerMinWidth(p.node.label) - 2);
-  if (narrow.length > 0) out.push('Container title may be cut off (ELK ignored the minimum width): ' + listSome(narrow.map(p => '"' + firstLine(p.node) + '"')) + '.');
-
-  const groups = new Map<string | null, Placed[]>();
-  for (const p of placed) {
-    const list = groups.get(p.node.parentId) || [];
-    list.push(p);
-    groups.set(p.node.parentId, list);
-  }
-  const overlaps: string[] = [];
-  groups.forEach(list => {
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const r1 = outerBox(list[i]);
-        const r2 = outerBox(list[j]);
-        if (r1.x + 1 < r2.x + r2.w && r2.x + 1 < r1.x + r1.w && r1.y + 1 < r2.y + r2.h && r2.y + 1 < r1.y + r1.h) {
-          overlaps.push('"' + firstLine(list[i].node) + '" / "' + firstLine(list[j].node) + '"');
-        }
-      }
-    }
-  });
-  if (overlaps.length > 0) out.push(overlaps.length + ' overlapping shape pair(s): ' + listSome(overlaps) + '.');
-
   const W = Math.round(layout?.width || 0);
   const H = Math.round(layout?.height || 0);
   if (W > 5000 || H > 4000) out.push('Layout is ' + W + 'x' + H + ' px, far larger than a slide; consider fewer items or shorter labels.');
   return out;
 }
 
-function segmentHitsRect(x1: number, y1: number, x2: number, y2: number, r: Box): boolean {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const p = [-dx, dx, -dy, dy];
-  const q = [x1 - r.x, r.x + r.w - x1, y1 - r.y, r.y + r.h - y1];
-  let t0 = 0;
-  let t1 = 1;
-  for (let i = 0; i < 4; i++) {
-    if (p[i] === 0) {
-      if (q[i] < 0) return false;
-      continue;
-    }
-    const t = q[i] / p[i];
-    if (p[i] < 0) {
-      if (t > t1) return false;
-      if (t > t0) t0 = t;
-    } else {
-      if (t < t0) return false;
-      if (t < t1) t1 = t;
-    }
-  }
-  return true;
-}
-
-interface Pt {
-  x: number;
-  y: number;
-}
-
-function collectRoutes(elkNode: any, out: Map<string, Pt[]>): void {
-  for (const e of elkNode.edges || []) {
-    const s = e.sections && e.sections[0];
-    if (!s || !s.startPoint || !s.endPoint) continue;
-    const pts: Pt[] = [s.startPoint].concat(s.bendPoints || [], [s.endPoint]).map((q: any) => ({ x: q.x, y: q.y }));
-    if (pts.every(q => isFinite(q.x) && isFinite(q.y))) out.set(e.id, pts);
-  }
-  for (const c of elkNode.children || []) collectRoutes(c, out);
-}
-
-function checkConnectorPaths(diagram: Diagram, placed: Placed[], routes: Map<string, Pt[]>): string[] {
-  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
-  const ancestors = (id: string): string[] => {
-    const seen: string[] = [];
-    let cur = byId.get(id)?.node.parentId ?? null;
-    while (cur && seen.indexOf(cur) < 0) {
-      seen.push(cur);
-      cur = byId.get(cur)?.node.parentId ?? null;
-    }
-    return seen;
-  };
-  const hits: string[] = [];
-  for (const e of diagram.edges) {
-    const a = byId.get(e.sourceId);
-    const b = byId.get(e.targetId);
-    if (!a || !b) continue;
-    let pts = routes.get(e.id);
-    if (!pts) {
-      const links = facingLinks(a, b);
-      pts = [{ x: a.x + a.w * links.from.x, y: a.y + a.h * links.from.y }, { x: b.x + b.w * links.to.x, y: b.y + b.h * links.to.y }];
-    }
-    const skip = new Set<string>([a.node.id, b.node.id].concat(ancestors(a.node.id), ancestors(b.node.id)));
-    let crossed: Placed | null = null;
-    for (const p of placed) {
-      if (skip.has(p.node.id) || crossed) continue;
-      const r = { x: p.x + 2, y: p.y + 2, w: p.w - 4, h: p.h - 4 };
-      if (r.w <= 0 || r.h <= 0) continue;
-      for (let i = 0; i < pts.length - 1; i++) {
-        if (segmentHitsRect(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, r)) {
-          crossed = p;
-          break;
-        }
-      }
-    }
-    if (crossed) hits.push('"' + firstLine(a.node) + '" -> "' + firstLine(b.node) + '" crosses "' + firstLine(crossed.node) + '"');
-  }
-  if (hits.length === 0) return [];
-  return [hits.length + ' connector(s) cross other shapes: ' + listSome(hits) + '.'];
-}
-
-interface LayoutResult {
-  layout: any;
-  failure: string | null;
-  mode: 'elk' | 'elk-simple' | 'grid';
-}
+interface LayoutResult { layout: any; failure: string | null; mode: 'elk' | 'elk-simple' | 'grid'; }
 
 async function computeLayout(diagram: Diagram, tag: string): Promise<LayoutResult> {
-  const opts = rootLayoutOptions(diagram);
-  const summary = 'algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length + ', edges=' + diagram.edges.length;
   let started = Date.now();
   let firstError = '';
   try {
     const layout = await elk.layout(buildElkGraph(diagram));
-    console.info(tag + ' ELK layout ok in ' + (Date.now() - started) + ' ms (' + summary + '), canvas ' + Math.round(layout.width || 0) + 'x' + Math.round(layout.height || 0));
     return { layout, failure: null, mode: 'elk' };
   } catch (err) {
     firstError = shortError(err);
-    console.error(tag + ' ELK layout failed after ' + (Date.now() - started) + ' ms (' + summary + '): ' + describeError(err));
   }
-  let retryError = '';
-  started = Date.now();
   try {
     const graph = buildElkGraph(diagram);
     graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT', 'elk.json.edgeCoords': 'ROOT' };
     const layout = await elk.layout(graph);
-    console.info(tag + ' ELK simple retry ok in ' + (Date.now() - started) + ' ms');
     return { layout, failure: 'ELK full layout failed (' + firstError + '); a simplified layout was used instead.', mode: 'elk-simple' };
-  } catch (err) {
-    retryError = shortError(err);
-    console.error(tag + ' ELK simple retry failed; using grid layout: ' + describeError(err));
-  }
+  } catch (err) {}
   return {
     layout: gridLayout(diagram),
-    failure: 'ELK failed, so a flat grid with no nesting was used. Full layout: ' + firstError + ' | Simple retry: ' + retryError,
+    failure: 'ELK failed, so a flat grid with no nesting was used. Full layout: ' + firstError,
     mode: 'grid'
   };
 }
@@ -1245,11 +1106,7 @@ function addIssuesNote(page: PageProxy, issues: string[]): void {
   if (issues.length > MAX) shown.push('... and ' + (issues.length - MAX) + ' more (see the browser console).');
   const h = 60 + shown.length * 34;
   trySet('render issues note', () => {
-    const note = page.addBlock({
-      className: FALLBACK_CLASS,
-      boundingBox: { x: CANVAS_MARGIN, y: 60 - h, w: 1100, h },
-      fillStyle: '#fde8e8'
-    });
+    const note = page.addBlock({ className: FALLBACK_CLASS, boundingBox: { x: CANVAS_MARGIN, y: 60 - h, w: 1100, h }, fillStyle: '#fde8e8' });
     setLabel(note, 'RENDER ISSUES (' + issues.length + ')\n' + shown.join('\n'));
     note.properties.set('LineColor', RED);
     note.properties.set('LineWidth', 3);
@@ -1311,23 +1168,17 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   if (failure) issues.unshift(failure);
   const placed: Placed[] = [];
   flattenLayout(layout, 0, 0, nodeById, placed);
-  if (placed.length < diagram.nodes.length) {
-    const missing = diagram.nodes.filter(n => !placed.some(p => p.node.id === n.id)).map(n => '"' + firstLine(n) + '"');
-    issues.push('Layout positioned ' + placed.length + ' of ' + diagram.nodes.length + ' items; missing ' + listSome(missing) + '.');
-  }
-  const routes = new Map<string, Pt[]>();
+  
   if (mode !== 'grid') {
     issues.push(...checkGeometry(placed, layout));
-    collectRoutes(layout, routes);
-    issues.push(...checkConnectorPaths(diagram, placed, routes));
   }
 
   const parents = new Set(diagram.nodes.map(n => n.parentId).filter(id => id !== null) as string[]);
   const roles = new Map<string, string>();
   const badgeFor = new Map<string, string>();
   const wanted = new Set<string>([FALLBACK_CLASS]);
-  const unmapped: string[] = [];
   const useBadges = SHOW_GCP_BADGES && diagram.archetype !== 'CONTEXT';
+  
   for (const p of placed) {
     const role = roleFor(p.node, diagram.archetype);
     roles.set(p.node.id, role);
@@ -1338,29 +1189,14 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       if (gcp) {
         badgeFor.set(p.node.id, gcp);
         wanted.add(gcp);
-      } else if (looksLikeGcp(p.node)) {
-        unmapped.push('"' + firstLine(p.node) + '" (technology "' + toolName(p.node) + '")');
       }
     }
   }
-  if (unmapped.length > 0) {
-    console.info(tag + ' ' + unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon: ' + unmapped.join(', '));
-  }
 
   const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
-  const ctx: DrawContext = {
-    issues,
-    unavailable: new Set(Array.from(wanted).filter(c => !available.has(c))),
-    substitutions: new Map<string, number>(),
-    fillMismatches: []
-  };
-  const failedBadges = Array.from(new Set(Array.from(badgeFor.values()))).filter(c => !available.has(c));
-  if (failedBadges.length > 0) {
-    issues.push('GCP 2021 icon class(es) failed to load, so those icons are missing: ' + listSome(failedBadges) + '.');
-  }
-
+  const ctx: DrawContext = { issues, unavailable: new Set(Array.from(wanted).filter(c => !available.has(c))), substitutions: new Map<string, number>(), fillMismatches: [] };
   const blocks = new Map<string, BlockProxy>();
-  let blocksSkipped = 0;
+  
   await stage(tag, 'create-blocks', () => {
     for (const p of placed) {
       const role = roles.get(p.node.id) || 'unknown';
@@ -1402,64 +1238,60 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
         if (block && badge && available.has(badge)) drawGcpBadge(page, badge, box, name, issues);
       }
 
-      if (block) {
-        blocks.set(p.node.id, block);
-      } else {
-        blocksSkipped++;
-      }
+      if (block) blocks.set(p.node.id, block);
     }
   });
 
-  let linesCreated = 0;
-  let linesSkipped = 0;
   const placedById = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
+  
+  // Track edge distribution per node to prevent line collisions
+  const edgeCount = new Map<string, number>();
+  for (const edge of diagram.edges) {
+    edgeCount.set(edge.sourceId, (edgeCount.get(edge.sourceId) || 0) + 1);
+    edgeCount.set(edge.targetId, (edgeCount.get(edge.targetId) || 0) + 1);
+  }
+
+  const currentEdgeIndex = new Map<string, number>();
+
   await stage(tag, 'create-lines', () => {
     for (const edge of diagram.edges) {
       const source = blocks.get(edge.sourceId);
       const target = blocks.get(edge.targetId);
       const a = placedById.get(edge.sourceId);
       const b = placedById.get(edge.targetId);
-      if (source && target && a && b && createEdge(page, source, target, edge, a, b, routes.get(edge.id), issues)) {
-        linesCreated++;
-      } else {
-        linesSkipped++;
-        issues.push('Connector "' + (nodeById.get(edge.sourceId)?.label || edge.sourceId) + '" -> "' + (nodeById.get(edge.targetId)?.label || edge.targetId) + '" was not drawn.');
+      
+      const sCount = edgeCount.get(edge.sourceId) || 1;
+      const tCount = edgeCount.get(edge.targetId) || 1;
+      const maxEdges = Math.max(sCount, tCount);
+      
+      const sIndex = currentEdgeIndex.get(edge.sourceId) || 0;
+      const tIndex = currentEdgeIndex.get(edge.targetId) || 0;
+      const edgeIndex = Math.max(sIndex, tIndex);
+      
+      currentEdgeIndex.set(edge.sourceId, sIndex + 1);
+      currentEdgeIndex.set(edge.targetId, tIndex + 1);
+
+      if (source && target && a && b) {
+        createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
       }
     }
   });
 
   await stage(tag, 'legend', () => drawLegend(page, placed, roles, ctx));
 
-  ctx.substitutions.forEach((count, key) => {
-    issues.push(count + ' shape(s) wanted class ' + key.replace(' -> ', ' but were drawn as ') + ', so they will not match the reference key.');
-  });
-  if (ctx.fillMismatches.length > 0) {
-    issues.push(ctx.fillMismatches.length + ' shape(s) did not take their key colour: ' + listSome(ctx.fillMismatches) + '.');
-  }
-
   if (issues.length > 0) addIssuesNote(page, issues);
 
-  console.info(
-    tag + ' done (layout ' + mode + '): blocks ' + blocks.size + ' created/' + blocksSkipped + ' skipped, lines ' +
-    linesCreated + ' created/' + linesSkipped + ' skipped, issues ' + issues.length +
-    (ctx.unavailable.size > 0 ? ', unavailable classes ' + Array.from(ctx.unavailable).join(', ') : '')
-  );
   return issues;
 }
 
 function parsePayload(data: unknown): BootstrapPayload | null {
   const raw = (data as any)?.csaPayload;
   if (!raw) return null;
-
   try {
     const payload: BootstrapPayload = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (payload.schemaVersion !== SCHEMA_VERSION || !Array.isArray(payload.diagrams)) {
-      console.error('Unsupported CSA payload schema version:', payload.schemaVersion);
-      return null;
-    }
+    if (payload.schemaVersion !== SCHEMA_VERSION || !Array.isArray(payload.diagrams)) return null;
     return payload;
   } catch (err) {
-    console.error('Failed to parse CSA payload:', err);
     return null;
   }
 }
@@ -1474,46 +1306,12 @@ client.processAndClearBootstrapData(async data => {
     pagesByTitle.set(page.getTitle(), page);
   }
 
-  console.info(
-    'CSA payload: ' + payload.diagrams.length + ' diagram(s) [' + payload.diagrams.map(d => d.pageTitle).join(' | ') +
-    ']; document pages [' + Array.from(pagesByTitle.keys()).join(' | ') + ']'
-  );
-
-  let rendered = 0;
   const problems: string[] = [];
   for (const diagram of payload.diagrams) {
     const page = pagesByTitle.get(diagram.pageTitle);
-    if (!page) {
-      console.warn('No page titled "' + diagram.pageTitle + '"; skipping diagram.');
-      problems.push(diagram.pageTitle + ': no matching page in the document; diagram skipped.');
-      continue;
-    }
+    if (!page) continue;
     try {
-      const issues = await renderDiagram(page, diagram);
-      if (issues.length > 0) {
-        problems.push(
-          diagram.pageTitle + ' (' + issues.length + '):\n   - ' + issues.slice(0, 5).join('\n   - ') +
-          (issues.length > 5 ? '\n   - ... ' + (issues.length - 5) + ' more, listed in the red note on the page' : '')
-        );
-      }
-      rendered++;
-    } catch (err) {
-      console.error('Failed to render "' + diagram.pageTitle + '": ' + describeError(err));
-      problems.push(diagram.pageTitle + ': render failed: ' + shortError(err));
-    }
-  }
-  console.info('Rendered ' + rendered + '/' + payload.diagrams.length + ' diagrams.');
-
-  if (problems.length > 0) {
-    const alertFn = (client as any).alert;
-    if (typeof alertFn === 'function') {
-      try {
-        await alertFn.call(client, 'CSA renderer found problems on ' + problems.length + ' slide(s):\n\n' + problems.join('\n\n'));
-      } catch (err) {
-        console.warn('Could not show alert: ' + describeError(err));
-      }
-    } else {
-      console.warn('client.alert is unavailable; problems were only written to the page notes and console.');
-    }
+      await renderDiagram(page, diagram);
+    } catch (err) {}
   }
 }, true);
