@@ -1,10 +1,49 @@
-// Converts the pasted CSA payload into the layout-free graph contract consumed by the
-// csa-elk-renderer extension. Contains no Apps Script service calls so it can be tested directly.
-
+// GraphNormalizer.js - Production Patched Version
 const BOOTSTRAP_SCHEMA_VERSION = 2;
 
-const SLIDE_ARCHETYPES = { 6: 'CONTEXT', 7: 'DECOMPOSITION', 8: 'DECOMPOSITION', 9: 'DECOMPOSITION', 10: 'DEPLOYMENT', 11: 'INFO_FLOW' };
-const SLIDE_SHORT_TITLES = { 6: 'System Context', 7: 'Current State', 8: 'Interim State', 9: 'Target State', 10: 'System Deployment', 11: 'Information Flow' };
+const SLIDE_ARCHETYPES = {
+  6: 'CONTEXT',
+  7: 'DECOMPOSITION',
+  8: 'DECOMPOSITION',
+  9: 'DECOMPOSITION',
+  10: 'DEPLOYMENT',
+  11: 'INFO_FLOW'
+};
+
+const SLIDE_SHORT_TITLES = {
+  6: 'System Context',
+  7: 'Current State',
+  8: 'Interim State',
+  9: 'Target State',
+  10: 'System Deployment',
+  11: 'Information Flow'
+};
+
+// Enforces CSA Diagram Standards: max 25 characters per line
+function wrapLabel(text, maxChars = 25) {
+  if (!text) return '';
+  const lines = String(text).split('\n');
+  const wrapped = [];
+
+  for (const line of lines) {
+    if (line.length <= maxChars) {
+      wrapped.push(line);
+      continue;
+    }
+    const words = line.split(' ');
+    let currentLine = '';
+    for (const word of words) {
+      if ((currentLine + ' ' + word).trim().length <= maxChars) {
+        currentLine = (currentLine + ' ' + word).trim();
+      } else {
+        if (currentLine) wrapped.push(currentLine);
+        currentLine = word;
+      }
+    }
+    if (currentLine) wrapped.push(currentLine);
+  }
+  return wrapped.join('\n');
+}
 
 function buildBootstrapPayload(raw) {
   const root = raw && raw.csa_lucidchart_payload ? raw.csa_lucidchart_payload : raw;
@@ -34,6 +73,7 @@ function normalizeDiagram(diagram, index, errors) {
   const ctx = hasSlide ? 'Slide ' + slideNumber : 'Diagram ' + (index + 1);
   const shortTitle = (hasSlide && SLIDE_SHORT_TITLES[slideNumber]) || diagram.title || ('Diagram ' + (index + 1));
   const pageTitle = hasSlide ? 'Slide ' + slideNumber + ': ' + shortTitle : shortTitle;
+  const archetype = (hasSlide && SLIDE_ARCHETYPES[slideNumber]) || 'GENERIC';
 
   const nodes = [];
   const ids = new Set();
@@ -49,21 +89,37 @@ function normalizeDiagram(diagram, index, errors) {
       errors.push(ctx + ': duplicate id "' + id + '".');
       return;
     }
-    const label = String(item.label || item.name || id);
     ids.add(id);
+
+    const rawLabel = String(item.label || item.name || id);
+    // Index original raw label so connectors referencing raw labels resolve cleanly
+    if (!labelToId.has(rawLabel)) labelToId.set(rawLabel, id);
+
+    const isSoR = !isContainer && (item.is_sor === true || item.isSoR === true);
+    const isCore = !isContainer && (item.isCore === true || item.is_core === true);
+
+    // Dynamic (SoR) badging: append only if not already present
+    let label = rawLabel;
+    if (isSoR && !/\(SoR\)$/i.test(label.trim())) {
+      label = label ? label + '\n(SoR)' : '(SoR)';
+    }
+    // Also index modified label
     if (!labelToId.has(label)) labelToId.set(label, id);
+
+    const parentContainer = item.parent_container || item.parentContainer || item.parentId || item.parent || null;
+    const rawKind = isContainer ? String(item.type || 'container').toLowerCase().replace(/[\s-]+/g, '_') : 'tool';
 
     nodes.push({
       id: id,
       label: label,
-      kind: isContainer ? String(item.type || 'container').toLowerCase() : 'tool',
+      kind: rawKind,
       isContainer: isContainer,
-      parentId: item.parent_container ? String(item.parent_container) : null,
+      parentId: parentContainer ? String(parentContainer) : null,
       technology: isContainer ? null : String(item.Technology || item.technology || item.name || item.label || '') || null,
-      category: isContainer ? '' : String(item.type || '').toLowerCase(),
-      deltaFlag: isContainer ? '' : String(item.delta_flag || 'Neutral'),
-      isSoR: !isContainer && item.is_sor === true,
-      isCore: !isContainer && item.isCore === true
+      category: isContainer ? '' : String(item.type || item.category || 'internal').toLowerCase(),
+      deltaFlag: isContainer ? '' : String(item.delta_flag || item.deltaFlag || 'Neutral'),
+      isSoR: isSoR,
+      isCore: isCore
     });
   };
 
@@ -76,6 +132,7 @@ function normalizeDiagram(diagram, index, errors) {
       errors.push(ctx + ': "' + n.id + '" references unknown parent "' + n.parentId + '".');
     }
   });
+
   nodes.forEach(n => {
     let cursor = n.parentId;
     for (let depth = 0; cursor && depth <= nodes.length; depth++) {
@@ -93,6 +150,17 @@ function normalizeDiagram(diagram, index, errors) {
     return labelToId.get(key) || null;
   };
 
+  // Slide 10: Zero-Line Mandate
+  if (archetype === 'DEPLOYMENT') {
+    return {
+      key: hasSlide ? 'slide_' + slideNumber : 'diagram_' + (index + 1),
+      pageTitle: pageTitle,
+      archetype: archetype,
+      nodes: nodes,
+      edges: []
+    };
+  }
+
   const edgeMap = new Map();
   (diagram.connectors || []).forEach((c, i) => {
     const sourceId = resolveRef(c.source);
@@ -102,41 +170,67 @@ function normalizeDiagram(diagram, index, errors) {
       return;
     }
 
-    const pairKey = sourceId < targetId ? sourceId + '||' + targetId : targetId + '||' + sourceId;
-    const existing = edgeMap.get(pairKey);
+    let stepNum = Number(c.stepNumber !== undefined && c.stepNumber !== null ? c.stepNumber : c.step_number);
+    if (!Number.isFinite(stepNum) && c.label) {
+      const stepMatch = /^\s*step\s+(\d+)/i.exec(String(c.label));
+      if (stepMatch) stepNum = Number(stepMatch[1]);
+    }
+    const hasStep = Number.isFinite(stepNum);
+
+    const isInstanceEdge = c.type === 'instance' || /^\s*instance\s*$/i.test(String(c.label || ''));
     const bidirectionalFlag = c.type === 'bidirectional';
-    const step = Number(c.stepNumber);
-    const hasStep = c.stepNumber !== undefined && c.stepNumber !== null && c.stepNumber !== '' && Number.isFinite(step);
+    const wrappedLabel = wrapLabel(c.label);
+
+    let pairKey;
+    if (archetype === 'INFO_FLOW') {
+      pairKey = hasStep ? 'step_' + stepNum + '__' + sourceId + '->' + targetId : 'seq_' + i + '__' + sourceId + '->' + targetId;
+    } else if (isInstanceEdge) {
+      pairKey = 'instance__' + sourceId + '->' + targetId;
+    } else {
+      pairKey = sourceId < targetId ? sourceId + '||' + targetId : targetId + '||' + sourceId;
+    }
+
+    const existing = edgeMap.get(pairKey);
 
     if (!existing) {
       edgeMap.set(pairKey, {
-        id: sourceId + '__' + targetId,
+        id: sourceId + '__' + targetId + (hasStep ? '__s' + stepNum : ''),
         sourceId: sourceId,
         targetId: targetId,
-        labels: c.label ? [String(c.label)] : [],
+        labels: wrappedLabel ? [wrappedLabel] : [],
         bidirectional: bidirectionalFlag,
-        stepNumbers: hasStep ? [step] : []
+        type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
+        stepNumbers: hasStep ? [stepNum] : []
       });
     } else {
-      if (c.label && existing.labels.indexOf(String(c.label)) === -1) existing.labels.push(String(c.label));
+      if (wrappedLabel && existing.labels.indexOf(wrappedLabel) === -1) existing.labels.push(wrappedLabel);
       if (existing.sourceId !== sourceId || bidirectionalFlag) existing.bidirectional = true;
-      if (hasStep && existing.stepNumbers.indexOf(step) === -1) existing.stepNumbers.push(step);
+      if (hasStep && existing.stepNumbers.indexOf(stepNum) === -1) existing.stepNumbers.push(stepNum);
     }
   });
 
-  const edges = Array.from(edgeMap.values()).map(e => ({
+  let edges = Array.from(edgeMap.values()).map(e => ({
     id: e.id,
     sourceId: e.sourceId,
     targetId: e.targetId,
     label: e.labels.join('\n'),
     bidirectional: e.bidirectional,
+    type: e.type,
     stepNumbers: e.stepNumbers
   }));
+
+  if (archetype === 'INFO_FLOW') {
+    edges.sort((a, b) => {
+      const aStep = a.stepNumbers && a.stepNumbers.length > 0 ? a.stepNumbers[0] : 0;
+      const bStep = b.stepNumbers && b.stepNumbers.length > 0 ? b.stepNumbers[0] : 0;
+      return aStep - bStep;
+    });
+  }
 
   return {
     key: hasSlide ? 'slide_' + slideNumber : 'diagram_' + (index + 1),
     pageTitle: pageTitle,
-    archetype: (hasSlide && SLIDE_ARCHETYPES[slideNumber]) || 'GENERIC',
+    archetype: archetype,
     nodes: nodes,
     edges: edges
   };

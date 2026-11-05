@@ -101,9 +101,9 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
     }
     seen.add(id);
 
-    // Feature 1: Append (SoR) to labels for authoritative stores dynamically
+    // Dynamic (SoR) badging: append only if not already present to prevent duplicate badging
     let label = String(raw.label === undefined || raw.label === null ? '' : raw.label);
-    if (raw.isSoR && !label.endsWith('(SoR)')) {
+    if (raw.isSoR && !/\(SoR\)$/i.test(label.trim())) {
       label = label ? `${label}\n(SoR)` : '(SoR)';
     }
 
@@ -144,7 +144,7 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   const edgeIds = new Set<string>();
   const edges: GraphEdge[] = [];
 
-  // Feature 2: Slide 10 (Deployment) Zero-Line Mandate
+  // Slide 10: Zero-Line Mandate
   if (diagram.archetype !== 'DEPLOYMENT') {
     (diagram.edges || []).forEach((raw, i) => {
       const sourceId = String(raw?.sourceId);
@@ -155,7 +155,7 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
         return;
       }
 
-      // Feature 3: Capability Zero-Connector Zone Enforcement
+      // Capability Zero-Connector Zone Enforcement
       const sourceNode = byId.get(sourceId);
       const targetNode = byId.get(targetId);
       if (sourceNode?.kind === 'capability' || targetNode?.kind === 'capability') {
@@ -204,17 +204,14 @@ const RED = '#D0021B';
 const RETIRING_LINE = '#9CA3AF';
 const TRANSPARENT = '#FFFFFF00';
 
-// Lucid classes to try, best first; FALLBACK_CLASS is always tried last.
 const RECT_CLASSES = [FALLBACK_CLASS];
 const CIRCLE_CLASSES = ['ConnectorBlock', 'CircleBlock'];
 const DATASTORE_CLASSES = ['DatabaseBlock', 'StoredDataBlock'];
 const ELLIPSE_CLASSES = ['ConnectorBlock', 'CircleBlock'];
 
-// A small GCP 2021 icon in the corner of a tool. The tool shape itself always follows the key.
 const SHOW_GCP_BADGES = true;
 const BADGE_SIZE = 32;
 
-// Class names from https://developer.lucid.co/docs/gcp-2021-library, keyed by normalizeTool().
 const GCP_CLASS_MAP: { [tool: string]: string } = {
   cloudrun: 'GCP2021CloudRunIcon',
   kubernetesengine: 'GCP2021GoogleKubernetesEngineIcon',
@@ -262,8 +259,14 @@ function firstLine(node: GraphNode): string {
   return String(node.label || node.id).split('\n')[0];
 }
 
+// Prevent browser engines, proxies, gateways, and client tools from being misclassified as database cylinders
 function isDataStore(node: GraphNode): boolean {
-  return node.isSoR || /database|\bdb\b|datastore|data\s*store|data\s*lake|\bcache\b/i.test(node.label + ' ' + (node.technology || ''));
+  if (node.isSoR) return true;
+  const text = (node.label + ' ' + (node.technology || '')).toLowerCase();
+  if (/browser|chrome|endpoint|client|gateway|proxy|ingress/i.test(text)) {
+    return false;
+  }
+  return /\b(database|datastore|data\s*lake|spanner|bigquery|sql|oracle|dynamodb|cosmos)\b/i.test(text);
 }
 
 function roleFor(node: GraphNode, archetype: string): string {
@@ -311,14 +314,15 @@ function isRetiring(node: GraphNode): boolean {
 const ELLIPSE_SCALE = 1.42;
 
 function ellipseMargin(w: number, h: number): { mx: number; my: number } {
-  return { mx: Math.ceil(((ELLIPSE_SCALE - 1) * w) / 2) + 4, my: Math.ceil(((ELLIPSE_SCALE - 1) * h) / 2) + 4 };
+  return { mx: Math.ceil(((ELLIPSE_SCALE - 1) * w) / 2) + 6, my: Math.ceil(((ELLIPSE_SCALE - 1) * h) / 2) + 6 };
 }
 
-const CHAR_W = 7;
-const LINE_H = 18;
+// Calibrated to Arial 12pt standard rendered width and line-height in Lucidchart
+const CHAR_W = 8.5;
+const LINE_H = 20;
 
 function wrappedLines(label: string, width: number): number {
-  const usable = Math.max(40, width - 30);
+  const usable = Math.max(50, width - 24);
   return String(label || '').split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((line.length * CHAR_W) / usable)), 0);
 }
 
@@ -329,19 +333,29 @@ function longestLine(label: string): number {
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    const w = Math.min(360, Math.max(220, longest * CHAR_W + 40));
-    return { w, h: Math.max(90, wrappedLines(node.label, w) * LINE_H + 50) };
+    const w = Math.min(440, Math.max(260, longest * CHAR_W + 48));
+    return { w, h: Math.max(100, wrappedLines(node.label, w) * LINE_H + 54) };
   }
   if (archetype === 'CONTEXT') {
-    const d = Math.min(220, Math.max(140, longest * 5 + 70));
+    const d = Math.min(240, Math.max(150, longest * 6 + 60));
     return { w: d, h: d };
   }
-  const w = Math.min(240, Math.max(150, longest * CHAR_W + 30));
-  return { w, h: Math.max(80, wrappedLines(node.label, w) * LINE_H + 44) };
+
+  // Account for database cylinder curves at top and bottom
+  if (isDataStore(node)) {
+    const w = Math.min(300, Math.max(180, longest * CHAR_W + 36));
+    const lines = wrappedLines(node.label, w);
+    return { w, h: Math.max(105, lines * LINE_H + 56) };
+  }
+
+  // Standard Tools & External Systems
+  const w = Math.min(280, Math.max(160, longest * CHAR_W + 32));
+  const h = Math.max(85, wrappedLines(node.label, w) * LINE_H + 38);
+  return { w, h };
 }
 
 function headerMinWidth(label: string): number {
-  return Math.min(480, Math.max(220, longestLine(label) * CHAR_W + 48));
+  return Math.min(480, Math.max(240, longestLine(label) * CHAR_W + 48));
 }
 
 function headerHeight(label: string, width: number): number {
@@ -354,43 +368,59 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     'elk.direction': 'RIGHT',
     'elk.edgeRouting': 'ORTHOGONAL',
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
-    'elk.spacing.nodeNode': '70',
-    'elk.spacing.edgeNode': '35',
-    'elk.spacing.edgeEdge': '25',
-    'elk.layered.spacing.edgeNodeBetweenLayers': '35',
-    'elk.layered.spacing.nodeNodeBetweenLayers': '160'
+    'elk.spacing.nodeNode': '90',
+    'elk.spacing.edgeNode': '50',
+    'elk.spacing.edgeEdge': '35',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '50',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '200'
   };
 
   if (diagram.archetype === 'CONTEXT') {
     options['elk.algorithm'] = 'layered';
     options['elk.direction'] = 'RIGHT';
+    options['elk.partitioning.activate'] = 'true';
     options['elk.partitioning'] = 'true';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '180';
-    options['elk.spacing.nodeNode'] = '75';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '260';
+    options['elk.spacing.nodeNode'] = '100';
+    options['elk.spacing.edgeNode'] = '60';
+    options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
     return options;
   }
 
   if (diagram.archetype === 'DECOMPOSITION') {
     options['elk.algorithm'] = 'layered';
     options['elk.direction'] = 'RIGHT';
-    options['elk.spacing.nodeNode'] = '80';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '160';
+    options['elk.spacing.nodeNode'] = '115';
+    options['elk.spacing.edgeNode'] = '65';
+    options['elk.spacing.edgeEdge'] = '40';
+    options['elk.layered.spacing.edgeNodeBetweenLayers'] = '65';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '280';
     options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
+    options['elk.edgeRouting.orthogonal.allSides'] = 'true';
     return options;
   }
 
   if (diagram.archetype === 'DEPLOYMENT') {
+    options['elk.algorithm'] = 'layered';
     options['elk.direction'] = 'DOWN';
+    options['elk.spacing.nodeNode'] = '80';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '90';
+    options['elk.aspectRatio'] = '1.6';
+    return options;
   }
 
   if (diagram.archetype === 'INFO_FLOW') {
     options['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '320';
+    options['elk.spacing.nodeNode'] = '110';
+    options['elk.spacing.edgeNode'] = '55';
+    options['elk.spacing.edgeEdge'] = '40';
+    return options;
   }
 
   return options;
 }
 
-// Determines the 3-column placement on Slide 6 (0: Inbound Actors | 1: Central Core Hub | 2: Downstream Partners/SaaS)
 function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
   if (node.isCore) return 1;
   const combinedText = (
@@ -400,7 +430,7 @@ function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
     kids.map(k => k.label + ' ' + (k.technology || '')).join(' ')
   ).toLowerCase();
 
-  if (/saas|directory|partner|external|provider|vendor|target|chronicle|siem/i.test(combinedText)) {
+  if (/saas|directory|partner|external|provider|vendor|target|chronicle|siem|ping|entra|workday|servicenow/i.test(combinedText)) {
     return 2;
   }
   return 0;
@@ -420,15 +450,17 @@ function buildElkGraph(diagram: Diagram): any {
 
     if (kids.length > 0) {
       const minW = headerMinWidth(node.label);
-      const top = headerHeight(node.label, minW) + 16;
+      const top = headerHeight(node.label, minW) + 24;
       elkNode.layoutOptions = {
-        'elk.padding': '[top=' + top + ',left=32,bottom=32,right=32]',
+        'elk.padding': '[top=' + top + ',left=40,bottom=40,right=40]',
         'elk.nodeSize.constraints': 'MINIMUM_SIZE',
-        'elk.nodeSize.minimum': '(' + minW + ', ' + (top + 40) + ')'
+        'elk.nodeSize.minimum': '(' + minW + ', ' + (top + 50) + ')'
       };
 
       if (diagram.archetype === 'CONTEXT' && node.parentId === null) {
-        elkNode.layoutOptions['elk.partition'] = String(getContextPartition(node, kids));
+        const part = String(getContextPartition(node, kids));
+        elkNode.layoutOptions['elk.partitioning.partition'] = part;
+        elkNode.layoutOptions['elk.partition'] = part;
       }
 
       elkNode.children = kids.map(toElk);
@@ -444,7 +476,9 @@ function buildElkGraph(diagram: Diagram): any {
       }
 
       if (diagram.archetype === 'CONTEXT' && node.parentId === null) {
-        elkNode.layoutOptions['elk.partition'] = String(getContextPartition(node, []));
+        const part = String(getContextPartition(node, []));
+        elkNode.layoutOptions['elk.partitioning.partition'] = part;
+        elkNode.layoutOptions['elk.partition'] = part;
       }
     }
     return elkNode;
@@ -479,7 +513,7 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
     const y = offsetY + (child.y || 0);
     const node = nodeById.get(child.id);
     if (node) {
-      out.push({ node, x, y, w: child.width || 140, h: child.height || 100 });
+      out.push({ node, x, y, w: child.width || 160, h: child.height || 100 });
     }
     flattenLayout(child, x, y, nodeById, out);
   }
@@ -702,7 +736,6 @@ function drawGcpBadge(page: PageProxy, className: string, tool: Box, label: stri
   }
 }
 
-// Attach each end to the border facing the other shape so lines leave and enter at borders cleanly.
 function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to: { x: number; y: number } } {
   const dx = b.x + b.w / 2 - (a.x + a.w / 2);
   const dy = b.y + b.h / 2 - (a.y + a.h / 2);
@@ -712,13 +745,37 @@ function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to
   return dy >= 0 ? { from: { x: 0.5, y: 1 }, to: { x: 0.5, y: 0 } } : { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } };
 }
 
-// Single cohesive, malleable orthogonal line adhering directly to Lucidchart's elbow engine
+function routeLinks(a: Placed, b: Placed, route?: Pt[]): { from: { x: number; y: number }; to: { x: number; y: number } } {
+  if (!route || route.length < 2) return facingLinks(a, b);
+  const start = route[0];
+  const next = route[1];
+  const prev = route[route.length - 2];
+  const end = route[route.length - 1];
+
+  let from = { x: 1, y: 0.5 };
+  if (Math.abs(next.x - start.x) >= Math.abs(next.y - start.y)) {
+    from = next.x >= start.x ? { x: 1, y: 0.5 } : { x: 0, y: 0.5 };
+  } else {
+    from = next.y >= start.y ? { x: 0.5, y: 1 } : { x: 0.5, y: 0 };
+  }
+
+  let to = { x: 0, y: 0.5 };
+  if (Math.abs(end.x - prev.x) >= Math.abs(end.y - prev.y)) {
+    to = end.x >= prev.x ? { x: 0, y: 0.5 } : { x: 1, y: 0.5 };
+  } else {
+    to = end.y >= prev.y ? { x: 0.5, y: 0 } : { x: 0.5, y: 1 };
+  }
+
+  return { from, to };
+}
+
 function createLine(
   page: PageProxy,
   source: BlockProxy,
   target: BlockProxy,
   edge: GraphEdge,
   links: { from: { x: number; y: number }; to: { x: number; y: number } },
+  route: Pt[] | undefined,
   issues: string[]
 ): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
@@ -729,7 +786,20 @@ function createLine(
     ...(style ? { style } : {})
   });
 
+  const intermediateVertexes = route && route.length > 2
+    ? route.slice(1, -1).map(pt => ({ x: pt.x + CANVAS_MARGIN, y: pt.y + CANVAS_MARGIN }))
+    : undefined;
+
+  const hasWaypoints = intermediateVertexes && intermediateVertexes.length > 0;
+
   const attempts: Array<[string, () => any]> = [
+    ...(hasWaypoints ? [
+      ['with-vertexes', () => page.addLine({
+        endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
+        endpoint2: endpoint(target, links.to, 'Arrow'),
+        vertexes: intermediateVertexes
+      })] as [string, () => any]
+    ] : []),
     ['styled', () => page.addLine({
       endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
       endpoint2: endpoint(target, links.to, 'Arrow')
@@ -755,14 +825,16 @@ function createLine(
   }
   if (!line) return false;
 
-  // Enforce a single native orthogonal elbow line that is fully draggable and malleable by users
-  trySet('line shape elbow', () => {
-    if (typeof line.setShape === 'function') {
-      line.setShape('elbow');
-    } else if (line.properties && typeof line.properties.set === 'function') {
-      line.properties.set('LineShape', 'elbow');
-    }
-  });
+  // Preserve ELK collision-avoiding waypoints; apply 'elbow' only when no waypoints exist
+  if (!hasWaypoints) {
+    trySet('line shape elbow', () => {
+      if (typeof line.setShape === 'function') {
+        line.setShape('elbow');
+      } else if (line.properties && typeof line.properties.set === 'function') {
+        line.properties.set('LineShape', 'elbow');
+      }
+    });
+  }
 
   if (edge.label && !setLineLabel(line, edge.label)) {
     issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
@@ -778,7 +850,7 @@ function setLineLabel(line: any, text: string): boolean {
     // fall through to addTextArea
   }
   try {
-    line.addTextArea(text, { location: 0.5, side: 0 });
+    line.addTextArea(text, { location: 0.40, side: 0 });
     return true;
   } catch (err) {
     console.warn('Could not label line: ' + describeError(err));
@@ -786,7 +858,6 @@ function setLineLabel(line: any, text: string): boolean {
   }
 }
 
-// Bypasses fragmented polyline rendering to produce a single, continuous, malleable arrow
 function createEdge(
   page: PageProxy,
   source: BlockProxy,
@@ -794,10 +865,11 @@ function createEdge(
   edge: GraphEdge,
   a: Placed,
   b: Placed,
-  _route: Pt[] | undefined,
+  route: Pt[] | undefined,
   issues: string[]
 ): boolean {
-  return createLine(page, source, target, edge, facingLinks(a, b), issues);
+  const links = routeLinks(a, b, route);
+  return createLine(page, source, target, edge, links, route, issues);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -805,7 +877,7 @@ function gridLayout(diagram: Diagram): any {
   return {
     children: diagram.nodes.map((n, i) => {
       const size = nodeSize(n, diagram.archetype);
-      return { id: n.id, x: (i % cols) * 340, y: Math.floor(i / cols) * 260, width: size.w, height: size.h };
+      return { id: n.id, x: (i % cols) * 360, y: Math.floor(i / cols) * 280, width: size.w, height: size.h };
     })
   };
 }
@@ -970,11 +1042,29 @@ function checkStandards(diagram: Diagram): string[] {
     const gaps: number[] = [];
     for (let i = 1; i <= (sorted[sorted.length - 1] || 0); i++) if (sorted.indexOf(i) < 0) gaps.push(i);
     if (gaps.length > 0) out.push('Step numbering has gaps; missing step(s) ' + gaps.join(', ') + '.');
+
+    // Strict Linear Hop Sequence Continuity Check
+    const edgesByStep = new Map<number, GraphEdge>();
+    for (const e of diagram.edges) {
+      const nums = stepsOf(e);
+      if (nums.length > 0 && !edgesByStep.has(nums[0])) edgesByStep.set(nums[0], e);
+    }
+    for (let s = 1; s < edgesByStep.size; s++) {
+      const cur = edgesByStep.get(s);
+      const next = edgesByStep.get(s + 1);
+      if (cur && next && cur.targetId !== next.sourceId && cur.sourceId !== next.sourceId) {
+        out.push('Information Flow break between Step ' + s + ' and Step ' + (s + 1) + ': "' + nameOf(cur.targetId) + '" does not connect to "' + nameOf(next.sourceId) + '".');
+      }
+    }
   } else if (a === 'CONTEXT') {
     for (const n of diagram.nodes) {
       if (!n.isContainer) continue;
       if (!childCount.get(n.id)) out.push('Container "' + firstLine(n) + '" is empty.');
       if (!isCapability(n.kind)) out.push('Container "' + firstLine(n) + '" is type ' + n.kind.toUpperCase() + '; slide 6 groups peripheral tools in CAPABILITY containers.');
+      // Enforce Slide 6 Anti-Crossing Density Limit (max 2 tools per capability container)
+      if ((childCount.get(n.id) || 0) > 2) {
+        out.push('Capability container "' + firstLine(n) + '" contains ' + childCount.get(n.id) + ' tools; slide 6 density limit is max 2 tools per container.');
+      }
     }
     const flagged = tools.filter(n => n.isCore === true);
     const cores = flagged.length > 0 ? flagged : tools.filter(n => !n.parentId);
@@ -986,8 +1076,15 @@ function checkStandards(diagram: Diagram): string[] {
     for (const n of tools) {
       if (!coreIds.has(n.id) && !n.parentId) out.push('Peripheral tool "' + firstLine(n) + '" should be inside a capability container.');
     }
+
+    // Natural Boundary Flow Validation:
+    // Partition 0 routes inward to core; core routes outward to Partition 2 or bidirectional with IdP.
     for (const e of diagram.edges) {
-      if (!coreIds.has(e.targetId)) out.push('Connector ' + edgeName(e) + ' does not point at the core tool; slide 6 flows point inward.');
+      const isSrcCore = coreIds.has(e.sourceId);
+      const isTgtCore = coreIds.has(e.targetId);
+      if (!isSrcCore && !isTgtCore) {
+        out.push('Connector ' + edgeName(e) + ' bypasses the central core tool; slide 6 flows must interface with the central core.');
+      }
     }
   }
   return out;
@@ -1412,8 +1509,8 @@ client.processAndClearBootstrapData(async data => {
       const issues = await renderDiagram(page, diagram);
       if (issues.length > 0) {
         problems.push(
-          diagram.pageTitle + ' (' + issues.length + '):\n  - ' + issues.slice(0, 5).join('\n  - ') +
-          (issues.length > 5 ? '\n  - ... ' + (issues.length - 5) + ' more, listed in the red note on the page' : '')
+          diagram.pageTitle + ' (' + issues.length + '):\n   - ' + issues.slice(0, 5).join('\n   - ') +
+          (issues.length > 5 ? '\n   - ... ' + (issues.length - 5) + ' more, listed in the red note on the page' : '')
         );
       }
       rendered++;
