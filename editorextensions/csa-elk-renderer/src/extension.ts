@@ -28,6 +28,9 @@ const elk = new ELK();
 const SCHEMA_VERSION = 2;
 const FALLBACK_CLASS = 'ProcessBlock';
 const CANVAS_MARGIN = 100;
+// The key sits top-left like Template v4, so the diagram starts to its right.
+const LEGEND_SPACE = 340;
+const DIAGRAM_X = CANVAS_MARGIN + LEGEND_SPACE;
 
 interface GraphNode {
   id: string;
@@ -275,27 +278,35 @@ function ellipseMargin(w: number, h: number): { mx: number; my: number } {
 }
 
 const CHAR_W = 8.5;
+// Container titles are bold, which renders wider than body text.
+const BOLD_CHAR_W = 9.5;
 const LINE_H = 20;
+const EDGE_LABEL_CHAR_W = 7;
+const EDGE_LABEL_LINE_H = 16;
 
-function wrappedLines(label: string, width: number): number {
+function wrappedLines(label: string, width: number, charW = CHAR_W): number {
   const usable = Math.max(50, width - 24);
-  return String(label || '').split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((line.length * CHAR_W) / usable)), 0);
+  return String(label || '').split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((line.length * charW) / usable)), 0);
 }
 
 function longestLine(label: string): number {
   return Math.max(0, ...String(label || '').split('\n').map(l => l.length));
 }
 
-// Container sizing ensuring bounding boxes clear multi-line wrapped text
 function headerMinWidth(label: string): number {
-  return Math.min(600, Math.max(280, longestLine(label) * CHAR_W + 64));
+  return Math.min(600, Math.max(280, longestLine(label) * BOLD_CHAR_W + 64));
+}
+
+function edgeLabelSize(label: string): { w: number; h: number } {
+  const lines = String(label || '').split('\n').length;
+  return { w: Math.ceil(longestLine(label) * EDGE_LABEL_CHAR_W + 16), h: lines * EDGE_LABEL_LINE_H + 8 };
 }
 
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    const w = Math.min(540, Math.max(300, longest * CHAR_W + 56));
-    return { w, h: Math.max(110, wrappedLines(node.label, w) * LINE_H + 58) };
+    const w = Math.min(540, Math.max(300, longest * BOLD_CHAR_W + 56));
+    return { w, h: Math.max(110, wrappedLines(node.label, w, BOLD_CHAR_W) * LINE_H + 58) };
   }
   if (archetype === 'CONTEXT') {
     const d = Math.min(220, Math.max(150, longest * 6.5 + 45));
@@ -311,59 +322,54 @@ function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } 
 }
 
 function headerHeight(label: string, width: number): number {
-  return Math.max(40, wrappedLines(label, width) * LINE_H + 16);
+  return Math.max(40, wrappedLines(label, width, BOLD_CHAR_W) * LINE_H + 16);
 }
 
+// Template v4 draws every tool on a decomposition slide at one size.
+function uniformToolSize(diagram: Diagram): { w: number; h: number } | null {
+  if (diagram.archetype !== 'DECOMPOSITION') return null;
+  const parents = new Set(diagram.nodes.map(n => n.parentId));
+  const tools = diagram.nodes.filter(n => !n.isContainer && !parents.has(n.id) && !isDataStore(n));
+  if (tools.length === 0) return null;
+  const sizes = tools.map(t => nodeSize(t, diagram.archetype));
+  return { w: Math.max(...sizes.map(s => s.w)), h: Math.max(...sizes.map(s => s.h)) };
+}
+
+const WRAPPING_KEY = 'elk.layered.wrapping.strategy';
+
+// Connector labels are sized ELK edge labels, so ELK reserves their space and corridor gaps can stay tight.
 function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
   const options: { [key: string]: string } = {
     'elk.algorithm': 'layered',
     'elk.direction': 'RIGHT',
     'elk.edgeRouting': 'ORTHOGONAL',
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
-    'elk.spacing.nodeNode': '90',
-    'elk.spacing.edgeNode': '50',
-    'elk.spacing.edgeEdge': '35',
-    'elk.layered.spacing.edgeNodeBetweenLayers': '50',
-    'elk.layered.spacing.nodeNodeBetweenLayers': '200'
+    'elk.edgeLabels.inline': 'true',
+    'elk.edgeLabels.placement': 'CENTER',
+    'elk.spacing.nodeNode': '60',
+    'elk.spacing.edgeNode': '30',
+    'elk.spacing.edgeEdge': '25',
+    'elk.spacing.edgeLabel': '6',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '30',
+    'elk.layered.spacing.edgeEdgeBetweenLayers': '20',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '90',
+    'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+    'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES'
   };
 
   if (diagram.archetype === 'CONTEXT') {
-    options['elk.algorithm'] = 'layered';
-    options['elk.direction'] = 'RIGHT';
     options['elk.partitioning.activate'] = 'true';
-    options['elk.partitioning'] = 'true';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '260';
-    options['elk.spacing.nodeNode'] = '100';
-    options['elk.spacing.edgeNode'] = '60';
-    options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
-    return options;
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '220';
+    options['elk.spacing.nodeNode'] = '70';
+    options['elk.spacing.edgeNode'] = '40';
   }
 
-  // Expanded spacing to prevent edge label and corridor overlapping
-  if (diagram.archetype === 'DECOMPOSITION') {
-    options['elk.algorithm'] = 'layered';
-    options['elk.direction'] = 'RIGHT';
-    options['elk.spacing.nodeNode'] = '115';
-    options['elk.spacing.edgeNode'] = '85';
-    options['elk.spacing.edgeEdge'] = '65';
-    options['elk.layered.spacing.edgeNodeBetweenLayers'] = '65';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '280';
-    options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
-    options['elk.edgeRouting.orthogonal.allSides'] = 'true';
-    return options;
-  }
-
-  // Balanced 16:9 flow compression for transaction hop sequencing
+  // Template v4 information flow is a 2D map, so long hop chains wrap onto new rows.
   if (diagram.archetype === 'INFO_FLOW') {
-    options['elk.algorithm'] = 'layered';
-    options['elk.direction'] = 'RIGHT';
-    options['elk.aspectRatio'] = '1.6';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '140';
-    options['elk.spacing.nodeNode'] = '100';
-    options['elk.spacing.edgeNode'] = '60';
-    options['elk.spacing.edgeEdge'] = '45';
-    options['elk.layered.nodePlacement.strategy'] = 'BRANDES_KOEPF';
-    return options;
+    options['elk.aspectRatio'] = '1.78';
+    options[WRAPPING_KEY] = 'MULTI_EDGE';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '80';
+    options['elk.spacing.nodeNode'] = '50';
   }
 
   return options;
@@ -381,88 +387,105 @@ function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
   return 0;
 }
 
-// 4-Quadrant Deployment Engine (Aligns with Slide 10 Template v4)
-function layoutDeploymentQuadrants(diagram: Diagram): any {
-  const QUAD_POSITIONS: { [key: string]: { x: number; y: number } } = {
-    TL: { x: 50, y: 50 },
-    TR: { x: 750, y: 50 },
-    BL: { x: 50, y: 520 },
-    BR: { x: 750, y: 520 }
+const DEP_GAP = 30;
+const DEP_PAD = 24;
+const QUADRANT_ORDER = ['TL', 'TR', 'BL', 'BR'];
+
+function deploymentOrder(env: GraphNode): number {
+  const hinted = QUADRANT_ORDER.indexOf(String(env.quadrant || '').toUpperCase());
+  if (hinted >= 0) return hinted;
+  const text = (env.label + ' ' + env.id).toLowerCase();
+  if (/fleet|endpoint|client|workforce/.test(text)) return 0;
+  if (/gcp|google|cloud|azure|aws/.test(text)) return 1;
+  if (/corporate|facilities|data\s*center|wdc|qdc/.test(text)) return 2;
+  if (/saas|third|external/.test(text)) return 3;
+  return 4;
+}
+
+// Shelf packing: fill rows left to right, wrap past maxWidth, then centre each row.
+function packRows(items: any[], maxWidth: number): { width: number; height: number } {
+  const rows: any[][] = [];
+  let x = 0;
+  let y = 0;
+  let rowH = 0;
+  let width = 0;
+  for (const item of items) {
+    if (rows.length === 0 || (x > 0 && x + item.width > maxWidth)) {
+      if (rows.length > 0) y += rowH + DEP_GAP;
+      rows.push([]);
+      x = 0;
+      rowH = 0;
+    }
+    item.x = x;
+    item.y = y;
+    rows[rows.length - 1].push(item);
+    x += item.width + DEP_GAP;
+    rowH = Math.max(rowH, item.height);
+    width = Math.max(width, x - DEP_GAP);
+  }
+  for (const row of rows) {
+    const last = row[row.length - 1];
+    const shift = (width - (last.x + last.width)) / 2;
+    row.forEach(i => { i.x += shift; });
+  }
+  return { width, height: rows.length ? y + rowH : 0 };
+}
+
+// Template v4 deployment: tools in a grid inside each Location, containers sized bottom-up, rows packed to 16:9.
+function layoutDeployment(diagram: Diagram): any {
+  const kids = new Map<string | null, GraphNode[]>();
+  diagram.nodes.forEach(n => {
+    const list = kids.get(n.parentId) || [];
+    list.push(n);
+    kids.set(n.parentId, list);
+  });
+
+  const build = (node: GraphNode): any => {
+    const children = kids.get(node.id) || [];
+    if (children.length === 0) {
+      const s = nodeSize(node, diagram.archetype);
+      return { id: node.id, width: s.w, height: s.h };
+    }
+    const built = children.map(build);
+    let content: { width: number; height: number };
+    if (built.every(c => !c.children)) {
+      const cellW = Math.max(...built.map(c => c.width));
+      const cellH = Math.max(...built.map(c => c.height));
+      const cols = built.length <= 3 ? built.length : built.length === 4 ? 2 : 3;
+      const rows = Math.ceil(built.length / cols);
+      built.forEach((c, i) => {
+        c.width = cellW;
+        c.height = cellH;
+        c.x = (i % cols) * (cellW + DEP_GAP);
+        c.y = Math.floor(i / cols) * (cellH + DEP_GAP);
+      });
+      content = { width: cols * cellW + (cols - 1) * DEP_GAP, height: rows * cellH + (rows - 1) * DEP_GAP };
+    } else {
+      content = packRows(built, Math.max(1500, ...built.map(c => c.width)));
+    }
+    const width = Math.max(headerMinWidth(node.label), content.width + 2 * DEP_PAD);
+    const top = headerHeight(node.label, width) + 12;
+    const shiftX = (width - content.width) / 2;
+    built.forEach(c => {
+      c.x += shiftX;
+      c.y += top;
+    });
+    return { id: node.id, width, height: top + content.height + DEP_PAD, children: built };
   };
 
-  const macroEnvs = diagram.nodes.filter(n => n.isContainer && n.parentId === null);
-  const childrenByParent = new Map<string, GraphNode[]>();
-  diagram.nodes.forEach(n => {
-    if (n.parentId) {
-      const list = childrenByParent.get(n.parentId) || [];
-      list.push(n);
-      childrenByParent.set(n.parentId, list);
-    }
-  });
-
-  const children: any[] = [];
-  macroEnvs.forEach((env, i) => {
-    let qKey = env.quadrant || 'TL';
-    if (!env.quadrant) {
-      const text = (env.label + ' ' + env.id).toLowerCase();
-      if (/fleet|endpoint|client|workforce/i.test(text)) qKey = 'TL';
-      else if (/gcp|google|cloud|azure|aws/i.test(text)) qKey = 'TR';
-      else if (/corporate|facilities|data\s*center|wdc|qdc/i.test(text)) qKey = 'BL';
-      else if (/saas|third|external/i.test(text)) qKey = 'BR';
-      else qKey = ['TL', 'TR', 'BL', 'BR'][i % 4];
-    }
-
-    const pos = QUAD_POSITIONS[qKey];
-    const locs = childrenByParent.get(env.id) || [];
-    const locNodes: any[] = [];
-
-    let locX = 30;
-    locs.forEach(loc => {
-      const tools = childrenByParent.get(loc.id) || [];
-      const toolW = 200;
-      const toolH = 75;
-      const toolNodes = tools.map((t, ti) => ({
-        id: t.id,
-        x: 20,
-        y: 50 + ti * (toolH + 20),
-        width: toolW,
-        height: toolH
-      }));
-
-      const locW = Math.max(headerMinWidth(loc.label) + 20, toolW + 40);
-      const locH = Math.max(120, 60 + tools.length * (toolH + 20));
-
-      locNodes.push({
-        id: loc.id,
-        x: locX,
-        y: 50,
-        width: locW,
-        height: locH,
-        children: toolNodes
-      });
-      locX += locW + 30;
-    });
-
-    const envW = Math.max(headerMinWidth(env.label) + 40, locX + 20);
-    const envH = Math.max(...locNodes.map(l => l.height + 80), 380);
-
-    children.push({
-      id: env.id,
-      x: pos.x,
-      y: pos.y,
-      width: Math.max(envW, 640),
-      height: envH,
-      children: locNodes
-    });
-  });
-
-  return { id: 'root', children };
+  const roots = (kids.get(null) || []).slice().sort((a, b) => deploymentOrder(a) - deploymentOrder(b));
+  const built = roots.map(build);
+  const area = built.reduce((sum, c) => sum + c.width * c.height, 0);
+  const target = Math.max(0, ...built.map(c => c.width), Math.sqrt(area * 1.78));
+  const size = packRows(built, target);
+  return { id: 'root', width: size.width, height: size.height, children: built };
 }
 
 function buildElkGraph(diagram: Diagram): any {
   if (diagram.archetype === 'DEPLOYMENT') {
-    return layoutDeploymentQuadrants(diagram);
+    return layoutDeployment(diagram);
   }
+  const toolSize = uniformToolSize(diagram);
 
   const childrenByParent = new Map<string | null, GraphNode[]>();
   for (const node of diagram.nodes) {
@@ -492,7 +515,7 @@ function buildElkGraph(diagram: Diagram): any {
 
       elkNode.children = kids.map(toElk);
     } else {
-      const size = nodeSize(node, diagram.archetype);
+      const size = toolSize && !node.isContainer && !isDataStore(node) ? toolSize : nodeSize(node, diagram.archetype);
       elkNode.width = size.w;
       elkNode.height = size.h;
       elkNode.layoutOptions = {};
@@ -515,7 +538,14 @@ function buildElkGraph(diagram: Diagram): any {
     id: 'root',
     layoutOptions: { ...rootLayoutOptions(diagram), 'elk.json.edgeCoords': 'ROOT' },
     children: (childrenByParent.get(null) || []).map(toElk),
-    edges: diagram.edges.map(e => ({ id: e.id, sources: [e.sourceId], targets: [e.targetId] }))
+    edges: diagram.edges.map(e => {
+      const elkEdge: any = { id: e.id, sources: [e.sourceId], targets: [e.targetId] };
+      if (e.label) {
+        const s = edgeLabelSize(e.label);
+        elkEdge.labels = [{ id: e.id + '__label', text: e.label, width: s.w, height: s.h }];
+      }
+      return elkEdge;
+    })
   };
 }
 
@@ -535,7 +565,7 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
 }
 
 function canvasBox(p: Placed): Box {
-  return { x: p.x + CANVAS_MARGIN, y: p.y + CANVAS_MARGIN, w: p.w, h: p.h };
+  return { x: p.x + DIAGRAM_X, y: p.y + CANVAS_MARGIN, w: p.w, h: p.h };
 }
 
 function outerBox(p: Placed): Box {
@@ -810,7 +840,7 @@ function createLine(
   if (!line) return false;
 
   trySet('line shape', () => {
-    const shapeType = archetype === 'CONTEXT' ? 'straight' : 'elbow';
+    const shapeType = archetype === 'CONTEXT' ? 'diagonal' : 'elbow';
     if (typeof line.setShape === 'function') {
       line.setShape(shapeType);
     } else if (line.properties && typeof line.properties.set === 'function') {
@@ -854,6 +884,118 @@ function createEdge(
 ): boolean {
   const links = routeLinks(a, b, edgeIndex, totalEdgesOnNode, archetype);
   return createLine(page, source, target, edge, links, archetype, edgeIndex, issues);
+}
+
+interface Pt { x: number; y: number; }
+interface Route { points: Pt[]; label: Box | null; }
+
+// ELK routes in root coordinates (elk.json.edgeCoords ROOT), keyed by edge id.
+function collectRoutes(elkNode: any, out = new Map<string, Route>()): Map<string, Route> {
+  for (const e of elkNode.edges || []) {
+    const points: Pt[] = [];
+    for (const s of e.sections || []) {
+      points.push(s.startPoint, ...(s.bendPoints || []), s.endPoint);
+    }
+    const l = (e.labels || [])[0];
+    const label = l && typeof l.x === 'number' ? { x: l.x, y: l.y, w: l.width || 0, h: l.height || 0 } : null;
+    if (points.length >= 2) out.set(e.id, { points, label });
+  }
+  for (const child of elkNode.children || []) collectRoutes(child, out);
+  return out;
+}
+
+// Drops repeated points and middle points of straight runs, so each segment is one real turn.
+function simplifyRoute(points: Pt[]): Pt[] {
+  const out: Pt[] = [];
+  for (const p of points) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(last.x - p.x) < 0.5 && Math.abs(last.y - p.y) < 0.5) continue;
+    if (out.length >= 2) {
+      const prev = out[out.length - 2];
+      const collinear = Math.abs((last.x - prev.x) * (p.y - prev.y) - (last.y - prev.y) * (p.x - prev.x)) < 0.5;
+      if (collinear) out.pop();
+    }
+    out.push(p);
+  }
+  return out;
+}
+
+function linkAt(box: Box, p: Pt): Pt {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  return { x: clamp((p.x - box.x) / box.w), y: clamp((p.y - box.y) / box.h) };
+}
+
+// Draws the obstacle-free ELK route as straight segments, since the SDK cannot set line waypoints
+// and Lucid's own elbow routing ignores the other blocks.
+function drawRoute(
+  page: PageProxy,
+  source: BlockProxy,
+  target: BlockProxy,
+  a: Box,
+  b: Box,
+  edge: GraphEdge,
+  route: Route,
+  issues: string[]
+): boolean {
+  const pts = simplifyRoute(route.points.map(p => ({ x: p.x + DIAGRAM_X, y: p.y + CANVAS_MARGIN })));
+  if (pts.length < 2) return false;
+  const last = pts.length - 2;
+  const lines: any[] = [];
+  try {
+    for (let i = 0; i <= last; i++) {
+      const from = pts[i];
+      const to = pts[i + 1];
+      const startStyle = i === 0 && edge.bidirectional ? { style: 'Arrow' } : {};
+      const endStyle = i === last ? { style: 'Arrow' } : {};
+      const endpoint1: any = i === 0
+        ? { connection: source, linkX: linkAt(a, from).x, linkY: linkAt(a, from).y, autoLink: false, ...startStyle }
+        : { x: from.x, y: from.y };
+      const endpoint2: any = i === last
+        ? { connection: target, linkX: linkAt(b, to).x, linkY: linkAt(b, to).y, autoLink: false, ...endStyle }
+        : { x: to.x, y: to.y };
+      const line: any = page.addLine({ endpoint1, endpoint2 });
+      trySet('line shape', () => line.setShape('diagonal'));
+      lines.push(line);
+    }
+  } catch (err) {
+    lines.forEach(l => trySet('remove partial route', () => l.delete()));
+    return false;
+  }
+
+  if (edge.label) {
+    // Put the label on the segment nearest ELK's reserved label slot; else the longest segment.
+    let best = 0;
+    let bestT = 0.5;
+    let bestScore = Infinity;
+    const centre = route.label
+      ? { x: route.label.x + route.label.w / 2 + DIAGRAM_X, y: route.label.y + route.label.h / 2 + CANVAS_MARGIN }
+      : null;
+    for (let i = 0; i <= last; i++) {
+      const p = pts[i];
+      const q = pts[i + 1];
+      const len = Math.hypot(q.x - p.x, q.y - p.y);
+      if (centre && len > 0) {
+        const t = Math.max(0, Math.min(1, ((centre.x - p.x) * (q.x - p.x) + (centre.y - p.y) * (q.y - p.y)) / (len * len)));
+        const d = Math.hypot(p.x + t * (q.x - p.x) - centre.x, p.y + t * (q.y - p.y) - centre.y);
+        if (d < bestScore) { bestScore = d; best = i; bestT = t; }
+      } else if (!centre && -len < bestScore) {
+        bestScore = -len; best = i; bestT = 0.5;
+      }
+    }
+    if (centre && bestScore > 40) {
+      // ELK's slot is off the route; fall back to the longest segment midpoint.
+      let longest = 0;
+      for (let i = 0; i <= last; i++) {
+        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        if (len > longest) { longest = len; best = i; }
+      }
+      bestT = 0.5;
+    }
+    if (!setLineLabel(lines[best], edge.label, Math.max(0.1, Math.min(0.9, bestT)))) {
+      issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
+    }
+  }
+  return true;
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -1078,15 +1220,40 @@ function checkGeometry(placed: Placed[], layout: any): string[] {
 
 interface LayoutResult { layout: any; failure: string | null; mode: 'elk' | 'elk-simple' | 'grid'; }
 
+// Template v4 context slides use full-height capability columns with a shared top edge.
+function stretchContextColumns(layout: any): void {
+  const columns = (layout.children || []).filter((c: any) => Array.isArray(c.children) && c.children.length > 0);
+  if (columns.length < 2) return;
+  const top = Math.min(...columns.map((c: any) => c.y || 0));
+  const bottom = Math.max(...columns.map((c: any) => (c.y || 0) + (c.height || 0)));
+  for (const c of columns) {
+    const shift = (bottom - top - c.height) / 2;
+    c.children.forEach((k: any) => { k.y = (k.y || 0) + shift; });
+    c.y = top;
+    c.height = bottom - top;
+  }
+}
+
 async function computeLayout(diagram: Diagram, tag: string): Promise<LayoutResult> {
-  let started = Date.now();
+  if (diagram.archetype === 'DEPLOYMENT') {
+    return { layout: buildElkGraph(diagram), failure: null, mode: 'elk' };
+  }
   let firstError = '';
   try {
     const layout = await elk.layout(buildElkGraph(diagram));
+    if (diagram.archetype === 'CONTEXT') stretchContextColumns(layout);
     return { layout, failure: null, mode: 'elk' };
   } catch (err) {
     firstError = shortError(err);
   }
+  try {
+    const graph = buildElkGraph(diagram);
+    if (graph.layoutOptions && graph.layoutOptions[WRAPPING_KEY]) {
+      delete graph.layoutOptions[WRAPPING_KEY];
+      const layout = await elk.layout(graph);
+      return { layout, failure: null, mode: 'elk' };
+    }
+  } catch (err) {}
   try {
     const graph = buildElkGraph(diagram);
     graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT', 'elk.json.edgeCoords': 'ROOT' };
@@ -1115,11 +1282,8 @@ function addIssuesNote(page: PageProxy, issues: string[]): void {
 
 function drawLegend(page: PageProxy, placed: Placed[], roles: Map<string, string>, ctx: DrawContext): void {
   if (placed.length === 0) return;
-  const right = Math.max(...placed.map(p => {
-    const o = outerBox(p);
-    return o.x + o.w;
-  }));
-  const x = right + CANVAS_MARGIN + 100;
+  // Template v4 puts the key in the top-left corner, in the LEGEND_SPACE strip left of the diagram.
+  const x = CANVAS_MARGIN + 20;
   const top = CANVAS_MARGIN;
 
   const seen = new Set<string>();
@@ -1208,7 +1372,17 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       if (p.node.isContainer && parents.has(p.node.id)) {
         block = drawShape(page, { classes: RECT_CLASSES, box, fill: swatch.fill, line: swatch.line, lineWidth: 2 }, swatch.legend + ' "' + name + '"', ctx);
         const titleBox = { x: box.x, y: box.y, w: box.w, h: headerHeight(p.node.label, box.w) };
-        drawShape(page, { classes: RECT_CLASSES, box: titleBox, fill: TRANSPARENT, line: TRANSPARENT, lineWidth: 0, text: p.node.label, bold: true }, swatch.legend + ' title "' + name + '"', ctx);
+        // Template v4 context swimlanes carry a white, outlined header strip.
+        const strip = diagram.archetype === 'CONTEXT';
+        drawShape(page, {
+          classes: RECT_CLASSES,
+          box: titleBox,
+          fill: strip ? '#FFFFFF' : TRANSPARENT,
+          line: strip ? swatch.line : TRANSPARENT,
+          lineWidth: strip ? 2 : 0,
+          text: p.node.label,
+          bold: true
+        }, swatch.legend + ' title "' + name + '"', ctx);
       } else if (p.node.isContainer) {
         block = drawShape(page, { classes: RECT_CLASSES, box, fill: swatch.fill, line: swatch.line, lineWidth: 2, text: p.node.label, bold: true }, swatch.legend + ' "' + name + '"', ctx);
       } else {
@@ -1252,6 +1426,8 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   }
 
   const currentEdgeIndex = new Map<string, number>();
+  // Context slides keep straight core-to-capability lines; columns are also stretched after ELK, so its routes are stale.
+  const routes = mode === 'grid' || diagram.archetype === 'CONTEXT' ? new Map<string, Route>() : collectRoutes(layout);
 
   await stage(tag, 'create-lines', () => {
     for (const edge of diagram.edges) {
@@ -1272,7 +1448,10 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       currentEdgeIndex.set(edge.targetId, tIndex + 1);
 
       if (source && target && a && b) {
-        createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
+        const route = routes.get(edge.id);
+        if (!route || !drawRoute(page, source, target, canvasBox(a), canvasBox(b), edge, route, issues)) {
+          createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
+        }
       }
     }
   });
@@ -1307,11 +1486,20 @@ client.processAndClearBootstrapData(async data => {
   }
 
   const problems: string[] = [];
+  let rendered = 0;
   for (const diagram of payload.diagrams) {
     const page = pagesByTitle.get(diagram.pageTitle);
-    if (!page) continue;
+    if (!page) {
+      console.warn('No page titled "' + diagram.pageTitle + '"; skipping. Pages: ' + Array.from(pagesByTitle.keys()).join(' | '));
+      continue;
+    }
     try {
       await renderDiagram(page, diagram);
-    } catch (err) {}
+      rendered++;
+    } catch (err) {
+      problems.push(diagram.pageTitle);
+      console.error('Failed to render "' + diagram.pageTitle + '": ' + describeError(err));
+    }
   }
+  console.info('Rendered ' + rendered + '/' + payload.diagrams.length + ' diagrams.' + (problems.length ? ' Failed: ' + problems.join(', ') : ''));
 }, true);
