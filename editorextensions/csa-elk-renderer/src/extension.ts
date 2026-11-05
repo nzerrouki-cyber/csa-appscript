@@ -775,7 +775,6 @@ function createLine(
   target: BlockProxy,
   edge: GraphEdge,
   links: { from: { x: number; y: number }; to: { x: number; y: number } },
-  route: Pt[] | undefined,
   issues: string[]
 ): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
@@ -786,20 +785,7 @@ function createLine(
     ...(style ? { style } : {})
   });
 
-  const intermediateVertexes = route && route.length > 2
-    ? route.slice(1, -1).map(pt => ({ x: pt.x + CANVAS_MARGIN, y: pt.y + CANVAS_MARGIN }))
-    : undefined;
-
-  const hasWaypoints = intermediateVertexes && intermediateVertexes.length > 0;
-
   const attempts: Array<[string, () => any]> = [
-    ...(hasWaypoints ? [
-      ['with-vertexes', () => page.addLine({
-        endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
-        endpoint2: endpoint(target, links.to, 'Arrow'),
-        vertexes: intermediateVertexes
-      })] as [string, () => any]
-    ] : []),
     ['styled', () => page.addLine({
       endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
       endpoint2: endpoint(target, links.to, 'Arrow')
@@ -825,16 +811,13 @@ function createLine(
   }
   if (!line) return false;
 
-  // Preserve ELK collision-avoiding waypoints; apply 'elbow' only when no waypoints exist
-  if (!hasWaypoints) {
-    trySet('line shape elbow', () => {
-      if (typeof line.setShape === 'function') {
-        line.setShape('elbow');
-      } else if (line.properties && typeof line.properties.set === 'function') {
-        line.properties.set('LineShape', 'elbow');
-      }
-    });
-  }
+  trySet('line shape elbow', () => {
+    if (typeof line.setShape === 'function') {
+      line.setShape('elbow');
+    } else if (line.properties && typeof line.properties.set === 'function') {
+      line.properties.set('LineShape', 'elbow');
+    }
+  });
 
   if (edge.label && !setLineLabel(line, edge.label)) {
     issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
@@ -869,7 +852,7 @@ function createEdge(
   issues: string[]
 ): boolean {
   const links = routeLinks(a, b, route);
-  return createLine(page, source, target, edge, links, route, issues);
+  return createLine(page, source, target, edge, links, issues);
 }
 
 function gridLayout(diagram: Diagram): any {
