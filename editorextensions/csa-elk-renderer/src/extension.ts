@@ -206,9 +206,9 @@ const TRANSPARENT = '#FFFFFF00';
 
 // Lucid classes to try, best first; FALLBACK_CLASS is always tried last.
 const RECT_CLASSES = [FALLBACK_CLASS];
-const CIRCLE_CLASSES = ['CircleBlock', 'ConnectorBlock', 'TerminatorBlock'];
+const CIRCLE_CLASSES = ['ConnectorBlock', 'CircleBlock'];
 const DATASTORE_CLASSES = ['DatabaseBlock', 'StoredDataBlock'];
-const ELLIPSE_CLASSES = ['CircleBlock', 'ConnectorBlock', 'TerminatorBlock'];
+const ELLIPSE_CLASSES = ['ConnectorBlock', 'CircleBlock'];
 
 // A small GCP 2021 icon in the corner of a tool. The tool shape itself always follows the key.
 const SHOW_GCP_BADGES = true;
@@ -360,7 +360,10 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     'elk.direction': 'RIGHT',
     'elk.edgeRouting': 'ORTHOGONAL',
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
-    'elk.spacing.nodeNode': '50',
+    'elk.spacing.nodeNode': '70',
+    'elk.spacing.edgeNode': '30',
+    'elk.spacing.edgeEdge': '20',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '30',
     // Wide enough for Lucid's connector labels, which ELK does not size.
     'elk.layered.spacing.nodeNodeBetweenLayers': '140'
   };
@@ -414,7 +417,7 @@ function buildElkGraph(diagram: Diagram): any {
 
   return {
     id: 'root',
-    layoutOptions: rootLayoutOptions(diagram),
+    layoutOptions: { ...rootLayoutOptions(diagram), 'elk.json.edgeCoords': 'ROOT' },
     children: (childrenByParent.get(null) || []).map(toElk),
     edges: diagram.edges.map(e => ({ id: e.id, sources: [e.sourceId], targets: [e.targetId] }))
   };
@@ -553,6 +556,20 @@ function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: strin
     issues.push(what + ' was placed at ' + fmtBox(got) + ' instead of ' + fmtBox(want) + '; the shape class may force its own size or position.');
   }
 }
+// Shapes ship with placeholder text ("Process", "A"); blank every area that does not hold the label.
+function clearOtherText(block: BlockProxy, keep: string | null): void {
+  let keys: string[] = [];
+  try {
+    keys = Array.from(block.textAreas.keys());
+  } catch {
+    return;
+  }
+  for (const key of keys) {
+    if (key === keep) continue;
+    trySet('placeholder text ' + key, () => block.textAreas.set(key, ''));
+  }
+}
+
 interface ShapeSpec {
   classes: string[];
   box: Box;
@@ -634,6 +651,7 @@ function drawShape(page: PageProxy, spec: ShapeSpec, what: string, ctx: DrawCont
       setBold(b, labelKey);
     }
   }
+  clearOtherText(b, labelKey);
   const leftover = leftoverText(b, labelKey);
   if (leftover.length > 0) ctx.issues.push(what + ' (' + used + ') still shows default text: ' + leftover.join(', ') + '.');
   checkBlockBox(b, spec.box, what + ' (' + used + ')', ctx.issues);
@@ -667,7 +685,7 @@ function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to
   return dy >= 0 ? { from: { x: 0.5, y: 1 }, to: { x: 0.5, y: 0 } } : { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } };
 }
 
-function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, links: { from: { x: number; y: number }; to: { x: number; y: number } }): boolean {
+function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, links: { from: { x: number; y: number }; to: { x: number; y: number } }, issues: string[]): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
     connection: block,
     linkX: at.x,
@@ -696,10 +714,75 @@ function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edg
   }
   if (!line) return false;
 
-  if (edge.label) {
-    trySet('line label', () => line.textAreas.set('Text', edge.label));
+  if (edge.label && !setLineLabel(line, edge.label)) {
+    issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
   }
   return true;
+}
+
+// textAreas.set on a line can succeed without showing anything, so it is read back; addTextArea is the fallback.
+function setLineLabel(line: any, text: string): boolean {
+  try {
+    line.textAreas.set('Text', text);
+    if (String(line.textAreas.get('Text') ?? '').replace(/\s+/g, '') === text.replace(/\s+/g, '')) return true;
+  } catch {
+    // fall through to addTextArea
+  }
+  try {
+    line.addTextArea(text, { location: 0.5, side: 0 });
+    return true;
+  } catch (err) {
+    console.warn('Could not label line: ' + describeError(err));
+    return false;
+  }
+}
+
+// Draws the ELK-routed path as straight segments so lines follow ELK's obstacle-free route instead of
+// Lucid's own elbow routing. The ends stay attached to the shapes; bend points are free-floating.
+function createRoutedLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, a: Placed, b: Placed, route: Pt[], issues: string[]): boolean {
+  const rel = (p: Placed, pt: Pt) => ({
+    x: Math.min(1, Math.max(0, (pt.x - p.x) / p.w)),
+    y: Math.min(1, Math.max(0, (pt.y - p.y) / p.h))
+  });
+  const abs = (pt: Pt) => ({ x: pt.x + CANVAS_MARGIN, y: pt.y + CANVAS_MARGIN });
+
+  let longest = 0;
+  let best = -1;
+  for (let i = 0; i < route.length - 1; i++) {
+    const len = Math.abs(route[i + 1].x - route[i].x) + Math.abs(route[i + 1].y - route[i].y);
+    if (len > best) {
+      best = len;
+      longest = i;
+    }
+  }
+
+  for (let i = 0; i < route.length - 1; i++) {
+    const first = i === 0;
+    const last = i === route.length - 2;
+    const r1 = rel(a, route[i]);
+    const r2 = rel(b, route[i + 1]);
+    const from: any = first
+      ? { connection: source, linkX: r1.x, linkY: r1.y, autoLink: false, ...(edge.bidirectional ? { style: 'Arrow' } : {}) }
+      : abs(route[i]);
+    const to: any = last ? { connection: target, linkX: r2.x, linkY: r2.y, autoLink: false, style: 'Arrow' } : abs(route[i + 1]);
+    const line: any = page.addLine({ endpoint1: from, endpoint2: to });
+    trySet('line shape', () => line.setShape('diagonal'));
+    if (edge.label && i === longest && !setLineLabel(line, edge.label)) {
+      issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
+    }
+  }
+  return true;
+}
+
+function createEdge(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, a: Placed, b: Placed, route: Pt[] | undefined, issues: string[]): boolean {
+  if (route && route.length >= 2) {
+    try {
+      return createRoutedLine(page, source, target, edge, a, b, route, issues);
+    } catch (err) {
+      console.warn('Routed line ' + edge.id + ' failed, using a plain line: ' + describeError(err));
+    }
+  }
+  return createLine(page, source, target, edge, facingLinks(a, b), issues);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -971,8 +1054,59 @@ function segmentHitsRect(x1: number, y1: number, x2: number, y2: number, r: Box)
   return true;
 }
 
-// Lucid routes the lines itself, so a direct path through another shape predicts crossings and detours.
-function checkConnectorPaths(diagram: Diagram, placed: Placed[]): string[] {
+interface Pt {
+  x: number;
+  y: number;
+}
+
+function collectRoutes(elkNode: any, out: Map<string, Pt[]>): void {
+  for (const e of elkNode.edges || []) {
+    const s = e.sections && e.sections[0];
+    if (!s || !s.startPoint || !s.endPoint) continue;
+    const pts: Pt[] = [s.startPoint].concat(s.bendPoints || [], [s.endPoint]).map((q: any) => ({ x: q.x, y: q.y }));
+    if (pts.every(q => isFinite(q.x) && isFinite(q.y))) out.set(e.id, pts);
+  }
+  for (const c of elkNode.children || []) collectRoutes(c, out);
+}
+
+function distanceToBox(pt: Pt, p: Placed): number {
+  const dx = Math.max(p.x - pt.x, 0, pt.x - (p.x + p.w));
+  const dy = Math.max(p.y - pt.y, 0, pt.y - (p.y + p.h));
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Fills routes with ELK's edge paths (root coordinates) that really start and end on their shapes.
+function usableRoutes(diagram: Diagram, placed: Placed[], layout: any, routes: Map<string, Pt[]>): string[] {
+  const all = new Map<string, Pt[]>();
+  collectRoutes(layout, all);
+  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
+  const nodeById = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
+  const nameOf = (e: GraphEdge) => '"' + (nodeById.has(e.sourceId) ? firstLine(nodeById.get(e.sourceId) as GraphNode) : e.sourceId) + '" -> "' + (nodeById.has(e.targetId) ? firstLine(nodeById.get(e.targetId) as GraphNode) : e.targetId) + '"';
+  const missing: string[] = [];
+  const misplaced: string[] = [];
+  for (const e of diagram.edges) {
+    const a = byId.get(e.sourceId);
+    const b = byId.get(e.targetId);
+    const raw = all.get(e.id);
+    if (!raw || !a || !b) {
+      missing.push(nameOf(e));
+      continue;
+    }
+    const pts = raw.filter((q, i) => i === 0 || Math.abs(q.x - raw[i - 1].x) + Math.abs(q.y - raw[i - 1].y) > 0.5);
+    if (pts.length < 2 || distanceToBox(pts[0], a) > 8 || distanceToBox(pts[pts.length - 1], b) > 8) {
+      misplaced.push(nameOf(e));
+      continue;
+    }
+    routes.set(e.id, pts);
+  }
+  const out: string[] = [];
+  if (missing.length > 0) out.push(missing.length + ' connector(s) have no ELK route and use Lucid routing instead: ' + listSome(missing) + '.');
+  if (misplaced.length > 0) out.push(misplaced.length + ' ELK route(s) do not start/end on their shapes (edge coordinate mismatch) and use Lucid routing instead: ' + listSome(misplaced) + '.');
+  return out;
+}
+
+// Checks the path each connector will take (ELK route, or a direct line when there is none) against unrelated shapes.
+function checkConnectorPaths(diagram: Diagram, placed: Placed[], routes: Map<string, Pt[]>): string[] {
   const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
   const ancestors = (id: string): string[] => {
     const seen: string[] = [];
@@ -988,25 +1122,29 @@ function checkConnectorPaths(diagram: Diagram, placed: Placed[]): string[] {
     const a = byId.get(e.sourceId);
     const b = byId.get(e.targetId);
     if (!a || !b) continue;
-    const links = facingLinks(a, b);
-    const x1 = a.x + a.w * links.from.x;
-    const y1 = a.y + a.h * links.from.y;
-    const x2 = b.x + b.w * links.to.x;
-    const y2 = b.y + b.h * links.to.y;
+    let pts = routes.get(e.id);
+    if (!pts) {
+      const links = facingLinks(a, b);
+      pts = [{ x: a.x + a.w * links.from.x, y: a.y + a.h * links.from.y }, { x: b.x + b.w * links.to.x, y: b.y + b.h * links.to.y }];
+    }
     const skip = new Set<string>([a.node.id, b.node.id].concat(ancestors(a.node.id), ancestors(b.node.id)));
+    let crossed: Placed | null = null;
     for (const p of placed) {
-      if (skip.has(p.node.id)) continue;
+      if (skip.has(p.node.id) || crossed) continue;
       const r = { x: p.x + 2, y: p.y + 2, w: p.w - 4, h: p.h - 4 };
-      if (r.w > 0 && r.h > 0 && segmentHitsRect(x1, y1, x2, y2, r)) {
-        hits.push('"' + firstLine(a.node) + '" -> "' + firstLine(b.node) + '" crosses "' + firstLine(p.node) + '"');
-        break;
+      if (r.w <= 0 || r.h <= 0) continue;
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (segmentHitsRect(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, r)) {
+          crossed = p;
+          break;
+        }
       }
     }
+    if (crossed) hits.push('"' + firstLine(a.node) + '" -> "' + firstLine(b.node) + '" crosses "' + firstLine(crossed.node) + '"');
   }
   if (hits.length === 0) return [];
-  return [hits.length + ' connector(s) cross other shapes on a direct path, so Lucid may draw them over or around boxes: ' + listSome(hits) + '.'];
+  return [hits.length + ' connector(s) cross other shapes: ' + listSome(hits) + '.'];
 }
-
 interface LayoutResult {
   layout: any;
   failure: string | null;
@@ -1031,7 +1169,7 @@ async function computeLayout(diagram: Diagram, tag: string): Promise<LayoutResul
   started = Date.now();
   try {
     const graph = buildElkGraph(diagram);
-    graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT' };
+    graph.layoutOptions = { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT', 'elk.json.edgeCoords': 'ROOT' };
     const layout = await elk.layout(graph);
     console.info(tag + ' ELK simple retry ok in ' + (Date.now() - started) + ' ms');
     return { layout, failure: 'ELK full layout failed (' + firstError + '); a simplified layout was used instead.', mode: 'elk-simple' };
@@ -1122,9 +1260,11 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
     const missing = diagram.nodes.filter(n => !placed.some(p => p.node.id === n.id)).map(n => '"' + firstLine(n) + '"');
     issues.push('Layout positioned ' + placed.length + ' of ' + diagram.nodes.length + ' items; missing ' + listSome(missing) + '.');
   }
+  const routes = new Map<string, Pt[]>();
   if (mode !== 'grid') {
     issues.push(...checkGeometry(placed, layout));
-    issues.push(...checkConnectorPaths(diagram, placed));
+    issues.push(...usableRoutes(diagram, placed, layout, routes));
+    issues.push(...checkConnectorPaths(diagram, placed, routes));
   }
 
   const parents = new Set(diagram.nodes.map(n => n.parentId).filter(id => id !== null) as string[]);
@@ -1149,7 +1289,7 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
     }
   }
   if (unmapped.length > 0) {
-    issues.push(unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon: ' + listSome(unmapped) + '. Add them to GCP_CLASS_MAP.');
+    console.info(tag + ' ' + unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon (add to GCP_CLASS_MAP): ' + unmapped.join(', '));
   }
 
   const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
@@ -1224,7 +1364,7 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       const target = blocks.get(edge.targetId);
       const a = placedById.get(edge.sourceId);
       const b = placedById.get(edge.targetId);
-      if (source && target && a && b && createLine(page, source, target, edge, facingLinks(a, b))) {
+      if (source && target && a && b && createEdge(page, source, target, edge, a, b, routes.get(edge.id), issues)) {
         linesCreated++;
       } else {
         linesSkipped++;
