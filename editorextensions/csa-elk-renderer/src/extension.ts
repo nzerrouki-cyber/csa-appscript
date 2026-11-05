@@ -88,7 +88,7 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   const tag = '[' + diagram.pageTitle + ']';
   const seen = new Set<string>();
   const nodes: GraphNode[] = [];
-  
+
   for (const raw of diagram.nodes || []) {
     if (!raw || raw.id === undefined || raw.id === null || raw.id === '') {
       console.warn(tag + ' dropping node with missing id:', JSON.stringify(raw));
@@ -100,7 +100,7 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
       continue;
     }
     seen.add(id);
-    
+
     // Feature 1: Append (SoR) to labels for authoritative stores dynamically
     let label = String(raw.label === undefined || raw.label === null ? '' : raw.label);
     if (raw.isSoR && !label.endsWith('(SoR)')) {
@@ -119,14 +119,14 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
   }
 
   const byId = new Map(nodes.map(n => [n.id, n] as [string, GraphNode]));
-  
+
   for (const n of nodes) {
     if (n.parentId !== null && (n.parentId === n.id || !byId.has(n.parentId))) {
       console.warn(tag + ' node ' + n.id + ' has missing/self parent "' + n.parentId + '"; moving to top level.');
       n.parentId = null;
     }
   }
-  
+
   for (const n of nodes) {
     const chain = new Set<string>([n.id]);
     let cur = n.parentId;
@@ -143,13 +143,13 @@ function sanitizeDiagram(diagram: Diagram): Diagram {
 
   const edgeIds = new Set<string>();
   const edges: GraphEdge[] = [];
-  
+
   // Feature 2: Slide 10 (Deployment) Zero-Line Mandate
   if (diagram.archetype !== 'DEPLOYMENT') {
     (diagram.edges || []).forEach((raw, i) => {
       const sourceId = String(raw?.sourceId);
       const targetId = String(raw?.targetId);
-      
+
       if (!byId.has(sourceId) || !byId.has(targetId)) {
         console.warn(tag + ' dropping edge ' + raw?.id + ' with unknown endpoint(s): ' + sourceId + ' -> ' + targetId);
         return;
@@ -215,7 +215,6 @@ const SHOW_GCP_BADGES = true;
 const BADGE_SIZE = 32;
 
 // Class names from https://developer.lucid.co/docs/gcp-2021-library, keyed by normalizeTool().
-// To support a new tool, add its normalized name here (see the "no GCP 2021 icon mapping" issue).
 const GCP_CLASS_MAP: { [tool: string]: string } = {
   cloudrun: 'GCP2021CloudRunIcon',
   kubernetesengine: 'GCP2021GoogleKubernetesEngineIcon',
@@ -239,7 +238,6 @@ const GCP_CLASS_MAP: { [tool: string]: string } = {
   dataproc: 'GCP2021DataprocIcon'
 };
 
-// "GCP Kubernetes Engine (Standard)" and "Google Kubernetes Engine" both become "kubernetesengine".
 function normalizeTool(name: string): string {
   return name
     .toLowerCase()
@@ -252,7 +250,6 @@ function toolName(node: GraphNode): string {
   return node.technology || node.label;
 }
 
-// technology is often generic ("Google Cloud Platform"), so the label is tried when it has no mapping.
 function resolveGcpClass(node: GraphNode): string | null {
   return GCP_CLASS_MAP[normalizeTool(toolName(node))] || GCP_CLASS_MAP[normalizeTool(node.label.split('\n')[0])] || null;
 }
@@ -303,7 +300,6 @@ function shapeClassesFor(node: GraphNode, role: string, archetype: string): stri
   return RECT_CLASSES;
 }
 
-// Red Circle Rule: Adding/Changing tools get a red ellipse drawn around them. "Retired" must not match.
 function isRedCircle(node: GraphNode): boolean {
   return !node.isContainer && /^\s*(add|chang|red\b)/i.test(node.deltaFlag || '');
 }
@@ -312,7 +308,6 @@ function isRetiring(node: GraphNode): boolean {
   return !node.isContainer && /^\s*retir/i.test(node.deltaFlag || '');
 }
 
-// An ellipse scaled by sqrt(2) passes through the corners of the box it surrounds.
 const ELLIPSE_SCALE = 1.42;
 
 function ellipseMargin(w: number, h: number): { mx: number; my: number } {
@@ -334,7 +329,7 @@ function longestLine(label: string): number {
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    const w = Math.min(320, Math.max(220, longest * CHAR_W + 40));
+    const w = Math.min(360, Math.max(220, longest * CHAR_W + 40));
     return { w, h: Math.max(90, wrappedLines(node.label, w) * LINE_H + 50) };
   }
   if (archetype === 'CONTEXT') {
@@ -345,7 +340,6 @@ function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } 
   return { w, h: Math.max(80, wrappedLines(node.label, w) * LINE_H + 44) };
 }
 
-// Containers that hold children get their title in a strip along the top edge.
 function headerMinWidth(label: string): number {
   return Math.min(480, Math.max(220, longestLine(label) * CHAR_W + 48));
 }
@@ -353,32 +347,63 @@ function headerMinWidth(label: string): number {
 function headerHeight(label: string, width: number): number {
   return Math.max(40, wrappedLines(label, width) * LINE_H + 16);
 }
+
 function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
-  const hasContainers = diagram.nodes.some(n => n.isContainer);
   const options: { [key: string]: string } = {
     'elk.algorithm': 'layered',
     'elk.direction': 'RIGHT',
     'elk.edgeRouting': 'ORTHOGONAL',
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
     'elk.spacing.nodeNode': '70',
-    'elk.spacing.edgeNode': '30',
-    'elk.spacing.edgeEdge': '20',
-    'elk.layered.spacing.edgeNodeBetweenLayers': '30',
-    // Wide enough for Lucid's connector labels, which ELK does not size.
-    'elk.layered.spacing.nodeNodeBetweenLayers': '140'
+    'elk.spacing.edgeNode': '35',
+    'elk.spacing.edgeEdge': '25',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '35',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '160'
   };
 
-  if (diagram.archetype === 'CONTEXT' && !hasContainers) {
-    return { 'elk.algorithm': 'radial', 'elk.spacing.nodeNode': '80' };
+  if (diagram.archetype === 'CONTEXT') {
+    options['elk.algorithm'] = 'layered';
+    options['elk.direction'] = 'RIGHT';
+    options['elk.partitioning'] = 'true';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '180';
+    options['elk.spacing.nodeNode'] = '75';
+    return options;
   }
+
+  if (diagram.archetype === 'DECOMPOSITION') {
+    options['elk.algorithm'] = 'layered';
+    options['elk.direction'] = 'RIGHT';
+    options['elk.spacing.nodeNode'] = '80';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '160';
+    options['elk.layered.nodePlacement.strategy'] = 'NETWORK_SIMPLEX';
+    return options;
+  }
+
   if (diagram.archetype === 'DEPLOYMENT') {
     options['elk.direction'] = 'DOWN';
   }
+
   if (diagram.archetype === 'INFO_FLOW') {
-    // Keep the payload's step order where the layering allows it.
     options['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
   }
+
   return options;
+}
+
+// Determines the 3-column placement on Slide 6 (0: Inbound Actors | 1: Central Core Hub | 2: Downstream Partners/SaaS)
+function getContextPartition(node: GraphNode, kids: GraphNode[]): number {
+  if (node.isCore) return 1;
+  const combinedText = (
+    node.label + ' ' +
+    (node.technology || '') + ' ' +
+    node.category + ' ' +
+    kids.map(k => k.label + ' ' + (k.technology || '')).join(' ')
+  ).toLowerCase();
+
+  if (/saas|directory|partner|external|provider|vendor|target|chronicle|siem/i.test(combinedText)) {
+    return 2;
+  }
+  return 0;
 }
 
 function buildElkGraph(diagram: Diagram): any {
@@ -401,15 +426,25 @@ function buildElkGraph(diagram: Diagram): any {
         'elk.nodeSize.constraints': 'MINIMUM_SIZE',
         'elk.nodeSize.minimum': '(' + minW + ', ' + (top + 40) + ')'
       };
+
+      if (diagram.archetype === 'CONTEXT' && node.parentId === null) {
+        elkNode.layoutOptions['elk.partition'] = String(getContextPartition(node, kids));
+      }
+
       elkNode.children = kids.map(toElk);
     } else {
       const size = nodeSize(node, diagram.archetype);
       elkNode.width = size.w;
       elkNode.height = size.h;
+      elkNode.layoutOptions = {};
+
       if (isRedCircle(node)) {
-        // Reserve room for the red ellipse so it does not overlap neighbours.
         const m = ellipseMargin(size.w, size.h);
-        elkNode.layoutOptions = { 'elk.margins': '[top=' + m.my + ',left=' + m.mx + ',bottom=' + m.my + ',right=' + m.mx + ']' };
+        elkNode.layoutOptions['elk.margins'] = '[top=' + m.my + ',left=' + m.mx + ',bottom=' + m.my + ',right=' + m.mx + ']';
+      }
+
+      if (diagram.archetype === 'CONTEXT' && node.parentId === null) {
+        elkNode.layoutOptions['elk.partition'] = String(getContextPartition(node, []));
       }
     }
     return elkNode;
@@ -438,8 +473,6 @@ interface Placed {
   h: number;
 }
 
-// ELK child coordinates are relative to their parent; parents are emitted before children
-// so containers sit underneath the blocks they hold.
 function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById: Map<string, GraphNode>, out: Placed[]): void {
   for (const child of elkNode.children || []) {
     const x = offsetX + (child.x || 0);
@@ -456,7 +489,6 @@ function canvasBox(p: Placed): Box {
   return { x: p.x + CANVAS_MARGIN, y: p.y + CANVAS_MARGIN, w: p.w, h: p.h };
 }
 
-// The area a shape really covers, including its red ellipse.
 function outerBox(p: Placed): Box {
   if (!isRedCircle(p.node)) return { x: p.x, y: p.y, w: p.w, h: p.h };
   const m = ellipseMargin(p.w, p.h);
@@ -490,8 +522,6 @@ function trySet(label: string, fn: () => void): void {
 
 const LABEL_KEYS = ['Name', 'Title', 'Text', 'Service Name', 'Header'];
 
-// set() on an unknown text area key does not throw, so each write is read back to confirm it took.
-// Returns the text area that holds the label, or null.
 function setLabel(block: BlockProxy, label: string): string | null {
   let existing: string[] = [];
   try {
@@ -509,7 +539,7 @@ function setLabel(block: BlockProxy, label: string): string | null {
       block.textAreas.set(key, label);
       if (String(block.textAreas.get(key) ?? '').replace(/\s+/g, '') === label.replace(/\s+/g, '')) return key;
     } catch {
-      // try the next key
+      // try next key
     }
   }
   return null;
@@ -526,7 +556,6 @@ function setBold(block: BlockProxy, key: string): void {
   }
 }
 
-// Text left in other areas is usually a shape's built-in placeholder ("Service Name", "Text", ...).
 function leftoverText(block: BlockProxy, keep: string | null): string[] {
   const out: string[] = [];
   try {
@@ -541,7 +570,6 @@ function leftoverText(block: BlockProxy, keep: string | null): string[] {
   return out;
 }
 
-// Some classes force their own size or snap position, which breaks the ELK layout.
 function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: string[]): void {
   let got: Box | undefined;
   try {
@@ -556,7 +584,7 @@ function checkBlockBox(block: BlockProxy, want: Box, what: string, issues: strin
     issues.push(what + ' was placed at ' + fmtBox(got) + ' instead of ' + fmtBox(want) + '; the shape class may force its own size or position.');
   }
 }
-// Shapes ship with placeholder text ("Process", "A"); blank every area that does not hold the label.
+
 function clearOtherText(block: BlockProxy, keep: string | null): void {
   let keys: string[] = [];
   try {
@@ -674,8 +702,7 @@ function drawGcpBadge(page: PageProxy, className: string, tool: Box, label: stri
   }
 }
 
-// Attach each end to the border facing the other shape instead of the centre, so lines leave
-// and enter at box edges rather than being drawn through neighbouring shapes.
+// Attach each end to the border facing the other shape so lines leave and enter at borders cleanly.
 function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to: { x: number; y: number } } {
   const dx = b.x + b.w / 2 - (a.x + a.w / 2);
   const dy = b.y + b.h / 2 - (a.y + a.h / 2);
@@ -685,7 +712,15 @@ function facingLinks(a: Placed, b: Placed): { from: { x: number; y: number }; to
   return dy >= 0 ? { from: { x: 0.5, y: 1 }, to: { x: 0.5, y: 0 } } : { from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } };
 }
 
-function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, links: { from: { x: number; y: number }; to: { x: number; y: number } }, issues: string[]): boolean {
+// Single cohesive, malleable orthogonal line adhering directly to Lucidchart's elbow engine
+function createLine(
+  page: PageProxy,
+  source: BlockProxy,
+  target: BlockProxy,
+  edge: GraphEdge,
+  links: { from: { x: number; y: number }; to: { x: number; y: number } },
+  issues: string[]
+): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
     connection: block,
     linkX: at.x,
@@ -699,8 +734,14 @@ function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edg
       endpoint1: endpoint(source, links.from, edge.bidirectional ? 'Arrow' : undefined),
       endpoint2: endpoint(target, links.to, 'Arrow')
     })],
-    ['unstyled', () => page.addLine({ endpoint1: endpoint(source, links.from), endpoint2: endpoint(target, links.to) })],
-    ['bare', () => page.addLine({ endpoint1: { connection: source }, endpoint2: { connection: target } } as any)]
+    ['unstyled', () => page.addLine({
+      endpoint1: endpoint(source, links.from),
+      endpoint2: endpoint(target, links.to)
+    })],
+    ['bare', () => page.addLine({
+      endpoint1: { connection: source },
+      endpoint2: { connection: target }
+    } as any)]
   ];
 
   let line: any;
@@ -714,13 +755,21 @@ function createLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edg
   }
   if (!line) return false;
 
+  // Enforce a single native orthogonal elbow line that is fully draggable and malleable by users
+  trySet('line shape elbow', () => {
+    if (typeof line.setShape === 'function') {
+      line.setShape('elbow');
+    } else if (line.properties && typeof line.properties.set === 'function') {
+      line.properties.set('LineShape', 'elbow');
+    }
+  });
+
   if (edge.label && !setLineLabel(line, edge.label)) {
     issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
   }
   return true;
 }
 
-// textAreas.set on a line can succeed without showing anything, so it is read back; addTextArea is the fallback.
 function setLineLabel(line: any, text: string): boolean {
   try {
     line.textAreas.set('Text', text);
@@ -737,51 +786,17 @@ function setLineLabel(line: any, text: string): boolean {
   }
 }
 
-// Draws the ELK-routed path as straight segments so lines follow ELK's obstacle-free route instead of
-// Lucid's own elbow routing. The ends stay attached to the shapes; bend points are free-floating.
-function createRoutedLine(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, a: Placed, b: Placed, route: Pt[], issues: string[]): boolean {
-  const rel = (p: Placed, pt: Pt) => ({
-    x: Math.min(1, Math.max(0, (pt.x - p.x) / p.w)),
-    y: Math.min(1, Math.max(0, (pt.y - p.y) / p.h))
-  });
-  const abs = (pt: Pt) => ({ x: pt.x + CANVAS_MARGIN, y: pt.y + CANVAS_MARGIN });
-
-  let longest = 0;
-  let best = -1;
-  for (let i = 0; i < route.length - 1; i++) {
-    const len = Math.abs(route[i + 1].x - route[i].x) + Math.abs(route[i + 1].y - route[i].y);
-    if (len > best) {
-      best = len;
-      longest = i;
-    }
-  }
-
-  for (let i = 0; i < route.length - 1; i++) {
-    const first = i === 0;
-    const last = i === route.length - 2;
-    const r1 = rel(a, route[i]);
-    const r2 = rel(b, route[i + 1]);
-    const from: any = first
-      ? { connection: source, linkX: r1.x, linkY: r1.y, autoLink: false, ...(edge.bidirectional ? { style: 'Arrow' } : {}) }
-      : abs(route[i]);
-    const to: any = last ? { connection: target, linkX: r2.x, linkY: r2.y, autoLink: false, style: 'Arrow' } : abs(route[i + 1]);
-    const line: any = page.addLine({ endpoint1: from, endpoint2: to });
-    trySet('line shape', () => line.setShape('diagonal'));
-    if (edge.label && i === longest && !setLineLabel(line, edge.label)) {
-      issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
-    }
-  }
-  return true;
-}
-
-function createEdge(page: PageProxy, source: BlockProxy, target: BlockProxy, edge: GraphEdge, a: Placed, b: Placed, route: Pt[] | undefined, issues: string[]): boolean {
-  if (route && route.length >= 2) {
-    try {
-      return createRoutedLine(page, source, target, edge, a, b, route, issues);
-    } catch (err) {
-      console.warn('Routed line ' + edge.id + ' failed, using a plain line: ' + describeError(err));
-    }
-  }
+// Bypasses fragmented polyline rendering to produce a single, continuous, malleable arrow
+function createEdge(
+  page: PageProxy,
+  source: BlockProxy,
+  target: BlockProxy,
+  edge: GraphEdge,
+  a: Placed,
+  b: Placed,
+  _route: Pt[] | undefined,
+  issues: string[]
+): boolean {
   return createLine(page, source, target, edge, facingLinks(a, b), issues);
 }
 
@@ -807,7 +822,6 @@ function listSome(items: string[], max = 3): string {
 const KNOWN_CONTAINER_KINDS = ['system', 'enterprise_system', 'capability', 'business_capability', 'macro_env', 'macro_environment', 'location', 'host', 'perimeter'];
 const DELTA_VALUES = ['neutral', 'adding', 'changing', 'retiring'];
 
-// Step numbers come from the normalizer; older payloads only carry them in "Step N: ..." labels.
 function stepsOf(edge: GraphEdge): number[] {
   if (Array.isArray(edge.stepNumbers) && edge.stepNumbers.length > 0) return edge.stepNumbers;
   const found: number[] = [];
@@ -817,7 +831,7 @@ function stepsOf(edge: GraphEdge): number[] {
   });
   return found;
 }
-// Checks the payload graph against the CSA Diagram Standards so structural mistakes are reported on the page.
+
 function checkStandards(diagram: Diagram): string[] {
   const out: string[] = [];
   const byId = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
@@ -857,7 +871,6 @@ function checkStandards(diagram: Diagram): string[] {
     }
   }
 
-  // Red Circle Rule / delta flags.
   for (const n of tools) {
     const raw = String(n.deltaFlag || 'Neutral').trim();
     const flag = raw.toLowerCase();
@@ -979,7 +992,7 @@ function checkStandards(diagram: Diagram): string[] {
   }
   return out;
 }
-// Post-layout checks: problems here mean ELK's output, not the payload, is off.
+
 function checkGeometry(placed: Placed[], layout: any): string[] {
   const out: string[] = [];
   const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
@@ -1029,7 +1042,6 @@ function checkGeometry(placed: Placed[], layout: any): string[] {
   return out;
 }
 
-// Liang-Barsky clip test.
 function segmentHitsRect(x1: number, y1: number, x2: number, y2: number, r: Box): boolean {
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -1069,43 +1081,6 @@ function collectRoutes(elkNode: any, out: Map<string, Pt[]>): void {
   for (const c of elkNode.children || []) collectRoutes(c, out);
 }
 
-function distanceToBox(pt: Pt, p: Placed): number {
-  const dx = Math.max(p.x - pt.x, 0, pt.x - (p.x + p.w));
-  const dy = Math.max(p.y - pt.y, 0, pt.y - (p.y + p.h));
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-// Fills routes with ELK's edge paths (root coordinates) that really start and end on their shapes.
-function usableRoutes(diagram: Diagram, placed: Placed[], layout: any, routes: Map<string, Pt[]>): string[] {
-  const all = new Map<string, Pt[]>();
-  collectRoutes(layout, all);
-  const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
-  const nodeById = new Map(diagram.nodes.map(n => [n.id, n] as [string, GraphNode]));
-  const nameOf = (e: GraphEdge) => '"' + (nodeById.has(e.sourceId) ? firstLine(nodeById.get(e.sourceId) as GraphNode) : e.sourceId) + '" -> "' + (nodeById.has(e.targetId) ? firstLine(nodeById.get(e.targetId) as GraphNode) : e.targetId) + '"';
-  const missing: string[] = [];
-  const misplaced: string[] = [];
-  for (const e of diagram.edges) {
-    const a = byId.get(e.sourceId);
-    const b = byId.get(e.targetId);
-    const raw = all.get(e.id);
-    if (!raw || !a || !b) {
-      missing.push(nameOf(e));
-      continue;
-    }
-    const pts = raw.filter((q, i) => i === 0 || Math.abs(q.x - raw[i - 1].x) + Math.abs(q.y - raw[i - 1].y) > 0.5);
-    if (pts.length < 2 || distanceToBox(pts[0], a) > 8 || distanceToBox(pts[pts.length - 1], b) > 8) {
-      misplaced.push(nameOf(e));
-      continue;
-    }
-    routes.set(e.id, pts);
-  }
-  const out: string[] = [];
-  if (missing.length > 0) out.push(missing.length + ' connector(s) have no ELK route and use Lucid routing instead: ' + listSome(missing) + '.');
-  if (misplaced.length > 0) out.push(misplaced.length + ' ELK route(s) do not start/end on their shapes (edge coordinate mismatch) and use Lucid routing instead: ' + listSome(misplaced) + '.');
-  return out;
-}
-
-// Checks the path each connector will take (ELK route, or a direct line when there is none) against unrelated shapes.
 function checkConnectorPaths(diagram: Diagram, placed: Placed[], routes: Map<string, Pt[]>): string[] {
   const byId = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
   const ancestors = (id: string): string[] => {
@@ -1145,13 +1120,13 @@ function checkConnectorPaths(diagram: Diagram, placed: Placed[], routes: Map<str
   if (hits.length === 0) return [];
   return [hits.length + ' connector(s) cross other shapes: ' + listSome(hits) + '.'];
 }
+
 interface LayoutResult {
   layout: any;
   failure: string | null;
   mode: 'elk' | 'elk-simple' | 'grid';
 }
 
-// failure is set when ELK could not lay the diagram out as requested.
 async function computeLayout(diagram: Diagram, tag: string): Promise<LayoutResult> {
   const opts = rootLayoutOptions(diagram);
   const summary = 'algorithm=' + opts['elk.algorithm'] + ', nodes=' + diagram.nodes.length + ', edges=' + diagram.edges.length;
@@ -1200,7 +1175,7 @@ function addIssuesNote(page: PageProxy, issues: string[]): void {
     note.properties.set('LineWidth', 3);
   });
 }
-// Key box to the right of the diagram, listing only the roles that appear on the page.
+
 function drawLegend(page: PageProxy, placed: Placed[], roles: Map<string, string>, ctx: DrawContext): void {
   if (placed.length === 0) return;
   const right = Math.max(...placed.map(p => {
@@ -1263,7 +1238,7 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   const routes = new Map<string, Pt[]>();
   if (mode !== 'grid') {
     issues.push(...checkGeometry(placed, layout));
-    issues.push(...usableRoutes(diagram, placed, layout, routes));
+    collectRoutes(layout, routes);
     issues.push(...checkConnectorPaths(diagram, placed, routes));
   }
 
@@ -1289,7 +1264,7 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
     }
   }
   if (unmapped.length > 0) {
-    console.info(tag + ' ' + unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon (add to GCP_CLASS_MAP): ' + unmapped.join(', '));
+    console.info(tag + ' ' + unmapped.length + ' GCP tool(s) have no GCP 2021 icon mapping and are drawn without an icon: ' + unmapped.join(', '));
   }
 
   const available = await stage(tag, 'load-classes', () => loadClasses(Array.from(wanted)));
@@ -1391,6 +1366,7 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   );
   return issues;
 }
+
 function parsePayload(data: unknown): BootstrapPayload | null {
   const raw = (data as any)?.csaPayload;
   if (!raw) return null;
