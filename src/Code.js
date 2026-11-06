@@ -11,15 +11,15 @@
  *      (including Key Dates, Portfolio, Authors, and EVP) to prevent vertical drift and 
  *      keep Key Dates locked in alignment while preserving CDS logo clearance.
  * - Slide 2: 
- *    - Target Outcomes inserts a dedicated newline before bullet points begin (\n\n).
+ *    - Target Outcomes inserts a dedicated newline before bullet points begin.
  *    - Problem Statement font size is locked to match Target Outcomes base font size.
- *    - Composite summary fallback enforces a clean multi-line boundary (\n\n\n).
+ *    - Composite summary fallback enforces a clean multi-line boundary (\n\n).
  * - Slide 3: Continuous 3-column markdown rendering (What, How, Why) with typo fallbacks.
  * - Slide 4: Pure 4-8-4 principles narrative mode; strips and suppresses auto-prepended meta prefixes.
  * - Slide 5: Dynamic 6-row table chunking with pagination markers; bolds Technology Name; renders markdown bold runs in Justification.
  * - Slides 6-10: Adaptive narrative markdown rendering with title-case bolding and safe vertical margins.
  * - Slide 11: 1:1 transaction flow alignment; resilient fallback for bulleted string or step array.
- * - Slide 12: Dynamic 3-card chunking across duplicated slides; eliminates orphaned divider slide; 4-row cards with >= 40pt safety clearance.
+ * - Slide 12: Dynamic 3-card chunking across duplicated slides; eliminates orphaned divider slide; 4-row cards with top-alignment padding and UI clearances.
  * - Slide 13: Full table and shape inspection; dynamic 6-item chunking supporting Category placeholders and dynamic semantic coloring.
  */
 
@@ -251,7 +251,8 @@ function generateCSADeck(jsonString) {
       if (cleanProb) injectSlide2ExecutiveSummary(s2, '{{Problem_Statement}}', cleanProb, targetOutcomesFontSize);
       if (cleanTarget) injectSlide2ExecutiveSummary(s2, '{{Target_Outcomes}}', cleanTarget, targetOutcomesFontSize);
     } else {
-      const compositeSummary = `${cleanProb}\n\n\n${cleanTarget}`;
+      // SPACING FIX: Exactly 2 line breaks (1 empty line) between the Problem Statement and Target Outcomes
+      const compositeSummary = `${cleanProb}\n\n${cleanTarget}`;
       injectSlide2ExecutiveSummary(s2, '{{Problem_Statement}}', compositeSummary.trim(), targetOutcomesFontSize);
     }
 
@@ -637,10 +638,15 @@ function generateCSADeck(jsonString) {
 function normalizeSlide2Section(rawText, headerName) {
   if (!rawText) return '';
   let text = rawText.trim();
+  // Remove existing headers if the AI included them
   const headerRegex = new RegExp(`^(\\*\\*)?${headerName}:?(\\*\\*)?\\s*`, 'i');
   text = text.replace(headerRegex, '').trim();
+  
+  // Clean up bullet line breaks
   text = text.replace(/\n\s*\n\s*(•|\*|-)/g, '\n$1');
-  return `${headerName}:\n\n${text}`;
+  
+  // SPACING FIX: Exactly 1 newline after the header
+  return `${headerName}:\n${text}`;
 }
 
 function injectSlide2ExecutiveSummary(slide, placeholder, rawText, explicitFontSize) {
@@ -942,14 +948,15 @@ function renderCalibratedAppendixCards(slide, cardDataList) {
 
     if (rowsData.length === 0) return;
 
+    // Adjusted Table Heights, Padding, and Column Widths for better spacing
     const numRows = Math.min(4, rowsData.length);
-    const initialTableHeight = Math.min(180, numRows * 30);
-    const tableTop = marginTop + headerHeight + 2;
+    const initialTableHeight = Math.min(180, numRows * 32); 
+    const tableTop = marginTop + headerHeight + 4; 
     const table = slide.insertTable(numRows, 2, left, tableTop, cardWidth, initialTableHeight);
 
     try {
-      table.getColumn(0).setWidth(70);
-      table.getColumn(1).setWidth(138);
+      table.getColumn(0).setWidth(75); 
+      table.getColumn(1).setWidth(133);
     } catch(e) {}
 
     for (let rIdx = 0; rIdx < numRows; rIdx++) {
@@ -957,27 +964,28 @@ function renderCalibratedAppendixCards(slide, cardDataList) {
       try {
         const cellLabel = table.getCell(rIdx, 0);
         cellLabel.getFill().setSolidFill('#EDF3F8');
-        cellLabel.setContentAlignment(SlidesApp.ContentAlignment.MIDDLE);
+        cellLabel.setContentAlignment(SlidesApp.ContentAlignment.TOP);
 
         const labelText = cellLabel.getText();
         labelText.setText(rowItem.Label || '');
-        labelText.getTextStyle().setFontSize(6.8).setBold(true).setForegroundColor('#00457C');
+        labelText.getTextStyle().setFontSize(7.0).setBold(true).setForegroundColor('#00457C');
 
         const cellVal = table.getCell(rIdx, 1);
         cellVal.getFill().setSolidFill('#FFFFFF');
-        cellVal.setContentAlignment(SlidesApp.ContentAlignment.MIDDLE);
+        cellVal.setContentAlignment(SlidesApp.ContentAlignment.TOP);
 
         const parsed = parseMarkdown(rowItem.Value || '');
         const valText = cellVal.getText();
         valText.setText(parsed.cleanText);
-        valText.getTextStyle().setFontSize(6.8).setBold(false).setForegroundColor('#333333');
+        valText.getTextStyle().setFontSize(7.0).setBold(false).setForegroundColor('#333333');
 
+        // Increase line spacing slightly for readability
         valText.getParagraphs().forEach(p => {
           try {
             const pStyle = p.getRange().getParagraphStyle();
-            pStyle.setLineSpacing(104);
-            pStyle.setSpaceAbove(0);
-            pStyle.setSpaceBelow(0);
+            pStyle.setLineSpacing(110);
+            pStyle.setSpaceAbove(2);
+            pStyle.setSpaceBelow(2);
           } catch(e) {}
         });
 

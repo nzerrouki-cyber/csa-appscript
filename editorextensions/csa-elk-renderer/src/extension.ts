@@ -89,7 +89,6 @@ async function stage<T>(tag: string, name: string, fn: () => T | Promise<T>): Pr
 }
 
 function sanitizeDiagram(diagram: Diagram): Diagram {
-  const tag = '[' + diagram.pageTitle + ']';
   const seen = new Set<string>();
   const nodes: GraphNode[] = [];
 
@@ -224,10 +223,6 @@ function resolveGcpClass(node: GraphNode): string | null {
   return GCP_CLASS_MAP[normalizeTool(toolName(node))] || GCP_CLASS_MAP[normalizeTool(node.label.split('\n')[0])] || null;
 }
 
-function looksLikeGcp(node: GraphNode): boolean {
-  return /^(gcp|google)\b/i.test(toolName(node).trim());
-}
-
 function firstLine(node: GraphNode): string {
   return String(node.label || node.id).split('\n')[0];
 }
@@ -278,7 +273,6 @@ function ellipseMargin(w: number, h: number): { mx: number; my: number } {
 }
 
 const CHAR_W = 8.5;
-// Container titles are bold, which renders wider than body text.
 const BOLD_CHAR_W = 9.5;
 const LINE_H = 20;
 const EDGE_LABEL_CHAR_W = 7;
@@ -294,7 +288,6 @@ function longestLine(label: string): number {
 }
 
 function headerMinWidth(label: string): number {
-  // Increased max cap to 800 and padding buffer to 90 to prevent title clipping
   return Math.min(800, Math.max(280, longestLine(label) * BOLD_CHAR_W + 90));
 }
 
@@ -306,7 +299,6 @@ function edgeLabelSize(label: string): { w: number; h: number } {
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    // Increased max cap to 800 and padding buffer to 90
     const w = Math.min(800, Math.max(300, longest * BOLD_CHAR_W + 90));
     return { w, h: Math.max(110, wrappedLines(node.label, w, BOLD_CHAR_W) * LINE_H + 58) };
   }
@@ -327,7 +319,6 @@ function headerHeight(label: string, width: number): number {
   return Math.max(40, wrappedLines(label, width, BOLD_CHAR_W) * LINE_H + 16);
 }
 
-// Template v4 draws every tool on a decomposition slide at one size.
 function uniformToolSize(diagram: Diagram): { w: number; h: number } | null {
   if (diagram.archetype !== 'DECOMPOSITION') return null;
   const parents = new Set(diagram.nodes.map(n => n.parentId));
@@ -339,7 +330,6 @@ function uniformToolSize(diagram: Diagram): { w: number; h: number } | null {
 
 const WRAPPING_KEY = 'elk.layered.wrapping.strategy';
 
-// Connector labels are sized ELK edge labels, so ELK reserves their space and corridor gaps can stay tight.
 function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
   const options: { [key: string]: string } = {
     'elk.algorithm': 'layered',
@@ -348,25 +338,31 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
     'elk.edgeLabels.inline': 'true',
     'elk.edgeLabels.placement': 'CENTER',
-    'elk.spacing.nodeNode': '60',
-    'elk.spacing.edgeNode': '30',
-    'elk.spacing.edgeEdge': '25',
-    'elk.spacing.edgeLabel': '6',
-    'elk.layered.spacing.edgeNodeBetweenLayers': '30',
-    'elk.layered.spacing.edgeEdgeBetweenLayers': '20',
-    'elk.layered.spacing.nodeNodeBetweenLayers': '90',
+    'elk.spacing.nodeNode': '80',
+    'elk.spacing.edgeNode': '65',
+    'elk.spacing.edgeEdge': '45',
+    'elk.spacing.edgeLabel': '10',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '50',
+    'elk.layered.spacing.edgeEdgeBetweenLayers': '35',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '180',
     'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
     'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES'
   };
 
   if (diagram.archetype === 'CONTEXT') {
     options['elk.partitioning.activate'] = 'true';
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '220';
-    options['elk.spacing.nodeNode'] = '70';
-    options['elk.spacing.edgeNode'] = '40';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '260';
+    options['elk.spacing.nodeNode'] = '80';
+    options['elk.spacing.edgeNode'] = '50';
   }
 
-  // Template v4 information flow is a 2D map, so long hop chains wrap onto new rows.
+  if (diagram.archetype === 'DECOMPOSITION') {
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '200';
+    options['elk.spacing.nodeNode'] = '85';
+    options['elk.spacing.edgeNode'] = '65';
+    options['elk.spacing.edgeEdge'] = '45';
+  }
+
   if (diagram.archetype === 'INFO_FLOW') {
     options['elk.aspectRatio'] = '1.78';
     options[WRAPPING_KEY] = 'MULTI_EDGE';
@@ -404,7 +400,6 @@ function deploymentOrder(env: GraphNode): number {
   return 4;
 }
 
-// Shelf packing: fill rows left to right, wrap past maxWidth, then centre each row.
 function packRows(items: any[], maxWidth: number): { width: number; height: number } {
   const rows: any[][] = [];
   let x = 0;
@@ -433,7 +428,6 @@ function packRows(items: any[], maxWidth: number): { width: number; height: numb
   return { width, height: rows.length ? y + rowH : 0 };
 }
 
-// Template v4 deployment: tools in a grid inside each Location, containers sized bottom-up, rows packed to 16:9.
 function layoutDeployment(diagram: Diagram): any {
   const kids = new Map<string | null, GraphNode[]>();
   diagram.nodes.forEach(n => {
@@ -568,12 +562,6 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
 
 function canvasBox(p: Placed): Box {
   return { x: p.x + DIAGRAM_X, y: p.y + CANVAS_MARGIN, w: p.w, h: p.h };
-}
-
-function outerBox(p: Placed): Box {
-  if (!isRedCircle(p.node)) return { x: p.x, y: p.y, w: p.w, h: p.h };
-  const m = ellipseMargin(p.w, p.h);
-  return { x: p.x - m.mx, y: p.y - m.my, w: p.w + 2 * m.mx, h: p.h + 2 * m.my };
 }
 
 function fmtBox(b: Box): string {
@@ -756,49 +744,54 @@ interface EdgePort {
   to: { x: number; y: number };
 }
 
-// Perimeter dynamic port distribution to prevent shared line trunk merging
+function calculatePortOffset(index: number, total: number): number {
+  if (total <= 1) return 0.5;
+  return 0.2 + (0.6 / (total - 1)) * index;
+}
+
 function getDistributedPorts(
   source: Placed,
   target: Placed,
-  edgeIndex: number,
-  totalEdgesOnNode: number,
+  sourcePortIndex: number,
+  sourcePortCount: number,
+  targetPortIndex: number,
+  targetPortCount: number,
   archetype: string
 ): EdgePort {
+  const fromOffset = calculatePortOffset(sourcePortIndex, sourcePortCount);
+  const toOffset = calculatePortOffset(targetPortIndex, targetPortCount);
+
   if (archetype === 'CONTEXT') {
     const dx = target.x + target.w / 2 - (source.x + source.w / 2);
     const dy = target.y + target.h / 2 - (source.y + source.h / 2);
-    const portOffset = totalEdgesOnNode > 1 ? 0.35 + (edgeIndex % 3) * 0.15 : 0.5;
 
     if (Math.abs(dx) >= Math.abs(dy)) {
       return dx > 0
-        ? { from: { x: 1, y: portOffset }, to: { x: 0, y: portOffset } }
-        : { from: { x: 0, y: portOffset }, to: { x: 1, y: portOffset } };
+        ? { from: { x: 1, y: fromOffset }, to: { x: 0, y: toOffset } }
+        : { from: { x: 0, y: fromOffset }, to: { x: 1, y: toOffset } };
     } else {
       return dy > 0
-        ? { from: { x: portOffset, y: 1 }, to: { x: portOffset, y: 0 } }
-        : { from: { x: portOffset, y: 0 }, to: { x: portOffset, y: 1 } };
+        ? { from: { x: fromOffset, y: 1 }, to: { x: toOffset, y: 0 } }
+        : { from: { x: fromOffset, y: 0 }, to: { x: toOffset, y: 1 } };
     }
   }
 
   const dx = target.x + target.w / 2 - (source.x + source.w / 2);
   const dy = target.y + target.h / 2 - (source.y + source.h / 2);
-  const offset = totalEdgesOnNode > 1 ? 0.25 + (edgeIndex % 3) * 0.25 : 0.5;
 
-  if (Math.abs(dx) / (source.w + target.w) >= Math.abs(dy) / (source.h + target.h)) {
+  // In horizontal left-to-right layouts, favor horizontal ports (East to West)
+  // to prevent lines from exiting bottom edges and slicing through lower containers.
+  if (Math.abs(dx) >= 60 || Math.abs(dx) >= Math.abs(dy) * 0.5) {
     return dx >= 0
-      ? { from: { x: 1, y: offset }, to: { x: 0, y: offset } }
-      : { from: { x: 0, y: offset }, to: { x: 1, y: offset } };
+      ? { from: { x: 1, y: fromOffset }, to: { x: 0, y: toOffset } }
+      : { from: { x: 0, y: fromOffset }, to: { x: 1, y: toOffset } };
   }
+
   return dy >= 0
-    ? { from: { x: offset, y: 1 }, to: { x: offset, y: 0 } }
-    : { from: { x: offset, y: 0 }, to: { x: offset, y: 1 } };
+    ? { from: { x: fromOffset, y: 1 }, to: { x: toOffset, y: 0 } }
+    : { from: { x: fromOffset, y: 0 }, to: { x: toOffset, y: 1 } };
 }
 
-function routeLinks(a: Placed, b: Placed, edgeIndex: number, totalEdgesOnNode: number, archetype: string): EdgePort {
-  return getDistributedPorts(a, b, edgeIndex, totalEdgesOnNode, archetype);
-}
-
-// Straight lines for System Context (Template v4 standard); elbow for others
 function createLine(
   page: PageProxy,
   source: BlockProxy,
@@ -850,7 +843,6 @@ function createLine(
     }
   });
 
-  // Stagger label placement along lines to avoid parallel text box overlap
   const locationOffset = 0.35 + (edgeIndex % 3) * 0.15;
   if (edge.label && !setLineLabel(line, edge.label, locationOffset)) {
     issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
@@ -860,7 +852,7 @@ function createLine(
 
 function setLineLabel(line: any, text: string, location = 0.45): boolean {
   try {
-    line.addTextArea(text, { location, side: 0 });
+    line.addTextArea(text, { location, side: -1 });
     return true;
   } catch {
     try {
@@ -879,13 +871,16 @@ function createEdge(
   edge: GraphEdge,
   a: Placed,
   b: Placed,
-  edgeIndex: number,
-  totalEdgesOnNode: number,
+  sPortIndex: number,
+  sPortCount: number,
+  tPortIndex: number,
+  tPortCount: number,
   archetype: string,
+  globalEdgeIndex: number,
   issues: string[]
 ): boolean {
-  const links = routeLinks(a, b, edgeIndex, totalEdgesOnNode, archetype);
-  return createLine(page, source, target, edge, links, archetype, edgeIndex, issues);
+  const links = getDistributedPorts(a, b, sPortIndex, sPortCount, tPortIndex, tPortCount, archetype);
+  return createLine(page, source, target, edge, links, archetype, globalEdgeIndex, issues);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -1110,7 +1105,6 @@ function checkGeometry(placed: Placed[], layout: any): string[] {
 
 interface LayoutResult { layout: any; failure: string | null; mode: 'elk' | 'elk-simple' | 'grid'; }
 
-// Template v4 context slides use full-height capability columns with a shared top edge.
 function stretchContextColumns(layout: any): void {
   const columns = (layout.children || []).filter((c: any) => Array.isArray(c.children) && c.children.length > 0);
   if (columns.length < 2) return;
@@ -1172,7 +1166,6 @@ function addIssuesNote(page: PageProxy, issues: string[]): void {
 
 function drawLegend(page: PageProxy, placed: Placed[], roles: Map<string, string>, ctx: DrawContext): void {
   if (placed.length === 0) return;
-  // Template v4 puts the key in the top-left corner, in the LEGEND_SPACE strip left of the diagram.
   const x = CANVAS_MARGIN + 20;
   const top = CANVAS_MARGIN;
 
@@ -1262,7 +1255,6 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       if (p.node.isContainer && parents.has(p.node.id)) {
         block = drawShape(page, { classes: RECT_CLASSES, box, fill: swatch.fill, line: swatch.line, lineWidth: 2 }, swatch.legend + ' "' + name + '"', ctx);
         const titleBox = { x: box.x, y: box.y, w: box.w, h: headerHeight(p.node.label, box.w) };
-        // Template v4 context swimlanes carry a white, outlined header strip.
         const strip = diagram.archetype === 'CONTEXT';
         drawShape(page, {
           classes: RECT_CLASSES,
@@ -1307,38 +1299,74 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   });
 
   const placedById = new Map(placed.map(p => [p.node.id, p] as [string, Placed]));
-  
-  // Track edge distribution per node to prevent line collisions
-  const edgeCount = new Map<string, number>();
-  for (const edge of diagram.edges) {
-    edgeCount.set(edge.sourceId, (edgeCount.get(edge.sourceId) || 0) + 1);
-    edgeCount.set(edge.targetId, (edgeCount.get(edge.targetId) || 0) + 1);
-  }
-
-  const currentEdgeIndex = new Map<string, number>();
 
   await stage(tag, 'create-lines', () => {
+    const outgoingByNode = new Map<string, GraphEdge[]>();
+    const incomingByNode = new Map<string, GraphEdge[]>();
+
     for (const edge of diagram.edges) {
+      const outList = outgoingByNode.get(edge.sourceId) || [];
+      outList.push(edge);
+      outgoingByNode.set(edge.sourceId, outList);
+
+      const inList = incomingByNode.get(edge.targetId) || [];
+      inList.push(edge);
+      incomingByNode.set(edge.targetId, inList);
+    }
+
+    for (const [nodeId, edges] of outgoingByNode.entries()) {
+      edges.sort((e1, e2) => {
+        const y1 = placedById.get(e1.targetId)?.y || 0;
+        const y2 = placedById.get(e2.targetId)?.y || 0;
+        return y1 - y2;
+      });
+    }
+
+    for (const [nodeId, edges] of incomingByNode.entries()) {
+      edges.sort((e1, e2) => {
+        const y1 = placedById.get(e1.sourceId)?.y || 0;
+        const y2 = placedById.get(e2.sourceId)?.y || 0;
+        return y1 - y2;
+      });
+    }
+
+    const drawnEdges = new Set<string>();
+    let globalEdgeIndex = 0;
+
+    for (const edge of diagram.edges) {
+      if (drawnEdges.has(edge.id)) continue;
+      drawnEdges.add(edge.id);
+
       const source = blocks.get(edge.sourceId);
       const target = blocks.get(edge.targetId);
       const a = placedById.get(edge.sourceId);
       const b = placedById.get(edge.targetId);
-      
-      const sCount = edgeCount.get(edge.sourceId) || 1;
-      const tCount = edgeCount.get(edge.targetId) || 1;
-      const maxEdges = Math.max(sCount, tCount);
-      
-      const sIndex = currentEdgeIndex.get(edge.sourceId) || 0;
-      const tIndex = currentEdgeIndex.get(edge.targetId) || 0;
-      const edgeIndex = Math.max(sIndex, tIndex);
-      
-      currentEdgeIndex.set(edge.sourceId, sIndex + 1);
-      currentEdgeIndex.set(edge.targetId, tIndex + 1);
 
       if (source && target && a && b) {
-        // BYPASS: We no longer call drawRoute(..., route). 
-        // We force createEdge so Lucidchart generates a single, native, malleable line.
-        createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
+        const outEdges = outgoingByNode.get(edge.sourceId) || [];
+        const inEdges = incomingByNode.get(edge.targetId) || [];
+
+        const sPortIndex = Math.max(0, outEdges.indexOf(edge));
+        const sPortCount = outEdges.length;
+
+        const tPortIndex = Math.max(0, inEdges.indexOf(edge));
+        const tPortCount = inEdges.length;
+
+        createEdge(
+          page,
+          source,
+          target,
+          edge,
+          a,
+          b,
+          sPortIndex,
+          sPortCount,
+          tPortIndex,
+          tPortCount,
+          diagram.archetype,
+          globalEdgeIndex++,
+          issues
+        );
       }
     }
   });

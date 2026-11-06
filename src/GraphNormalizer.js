@@ -148,7 +148,7 @@ function normalizeDiagram(diagram, index, errors) {
     };
   }
 
-  // Group edges to enforce a single malleable arrow between any two components
+  // Group edges to enforce a single malleable arrow between any two components (Slides 6-9)
   const edgeGroups = new Map();
   
   (diagram.connectors || []).forEach((c, i) => {
@@ -167,8 +167,17 @@ function normalizeDiagram(diagram, index, errors) {
     const hasStep = Number.isFinite(stepNum);
     const isInstanceEdge = c.type === 'instance' || /^\s*instance\s*$/i.test(String(c.label || ''));
     
-    // Create a unique key for the node pair
-    const pairKey = `${sourceId}::${targetId}`;
+    // In INFO_FLOW, maintain distinct sequential steps.
+    // In CONTEXT & DECOMPOSITION, group all interactions between two nodes into one edge.
+    let pairKey;
+    if (archetype === 'INFO_FLOW') {
+      pairKey = `${sourceId}::${targetId}::${hasStep ? stepNum : i}`;
+    } else if (isInstanceEdge) {
+      pairKey = `instance::${sourceId}::${targetId}`;
+    } else {
+      const sortedPair = [sourceId, targetId].sort();
+      pairKey = `${sortedPair[0]}::${sortedPair[1]}`;
+    }
     
     if (!edgeGroups.has(pairKey)) {
       edgeGroups.set(pairKey, {
@@ -183,9 +192,22 @@ function normalizeDiagram(diagram, index, errors) {
     }
     
     const group = edgeGroups.get(pairKey);
-    if (c.label) group.labels.push(wrapLabel(c.label, 25));
+    
+    // If an interaction exists in reverse direction, mark edge as bidirectional
+    if (group.sourceId !== sourceId && !isInstanceEdge && archetype !== 'INFO_FLOW') {
+      group.bidirectional = true;
+    }
+    if (c.bidirectional || c.type === 'bidirectional') {
+      group.bidirectional = true;
+    }
+
+    if (c.label) {
+      const wrapped = wrapLabel(c.label, 25);
+      if (!group.labels.includes(wrapped)) {
+        group.labels.push(wrapped);
+      }
+    }
     if (hasStep) group.stepNumbers.push(stepNum);
-    if (c.bidirectional || c.type === 'bidirectional') group.bidirectional = true;
   });
 
   const edges = Array.from(edgeGroups.values()).map(g => ({
