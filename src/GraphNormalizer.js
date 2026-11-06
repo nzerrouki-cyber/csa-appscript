@@ -97,7 +97,7 @@ function normalizeDiagram(diagram, index, errors) {
     const isCore = !isContainer && (item.isCore === true || item.is_core === true);
 
     // Apply label wrapping to prevent container text blowout
-    let label = isContainer ? wrapLabel(rawLabel, 32) : wrapLabel(rawLabel, 24);
+    let label = isContainer ? wrapLabel(rawLabel, 28) : wrapLabel(rawLabel, 24);
     if (isSoR && !/\(SoR\)$/i.test(label.trim())) {
       label = label ? label + '\n(SoR)' : '(SoR)';
     }
@@ -148,12 +148,14 @@ function normalizeDiagram(diagram, index, errors) {
     };
   }
 
-  const edges = [];
+  // Group edges to enforce a single malleable arrow between any two components
+  const edgeGroups = new Map();
+  
   (diagram.connectors || []).forEach((c, i) => {
     const sourceId = resolveRef(c.source);
     const targetId = resolveRef(c.target);
     if (!sourceId || !targetId) {
-      errors.push(ctx + ': connector #' + (i + 1) + ' ("' + c.source + '" -> "' + c.target + '") references an unknown node.');
+      errors.push(ctx + ': connector #' + (i + 1) + ' references an unknown node.');
       return;
     }
 
@@ -164,18 +166,33 @@ function normalizeDiagram(diagram, index, errors) {
     }
     const hasStep = Number.isFinite(stepNum);
     const isInstanceEdge = c.type === 'instance' || /^\s*instance\s*$/i.test(String(c.label || ''));
-
-    // DO NOT forcibly collapse distinct interactions into one edge on Slides 6-9
-    edges.push({
-      id: c.id || (sourceId + '__' + targetId + '__' + i),
-      sourceId: sourceId,
-      targetId: targetId,
-      label: wrapLabel(c.label, 25),
-      bidirectional: !!c.bidirectional || c.type === 'bidirectional',
-      type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
-      stepNumbers: hasStep ? [stepNum] : []
-    });
+    
+    // Create a unique key for the node pair
+    const pairKey = `${sourceId}::${targetId}`;
+    
+    if (!edgeGroups.has(pairKey)) {
+      edgeGroups.set(pairKey, {
+        id: c.id || (sourceId + '__' + targetId),
+        sourceId: sourceId,
+        targetId: targetId,
+        labels: [],
+        bidirectional: !!c.bidirectional || c.type === 'bidirectional',
+        type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
+        stepNumbers: []
+      });
+    }
+    
+    const group = edgeGroups.get(pairKey);
+    if (c.label) group.labels.push(wrapLabel(c.label, 25));
+    if (hasStep) group.stepNumbers.push(stepNum);
+    if (c.bidirectional || c.type === 'bidirectional') group.bidirectional = true;
   });
+
+  const edges = Array.from(edgeGroups.values()).map(g => ({
+    ...g,
+    // Collapse all distinct interactions into a single malleable arrow with a combined label
+    label: g.labels.join('\n---\n') 
+  }));
 
   if (archetype === 'INFO_FLOW') {
     edges.sort((a, b) => (a.stepNumbers[0] || 0) - (b.stepNumbers[0] || 0));

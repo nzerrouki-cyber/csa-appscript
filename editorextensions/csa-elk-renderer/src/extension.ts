@@ -294,7 +294,8 @@ function longestLine(label: string): number {
 }
 
 function headerMinWidth(label: string): number {
-  return Math.min(600, Math.max(280, longestLine(label) * BOLD_CHAR_W + 64));
+  // Increased max cap to 800 and padding buffer to 90 to prevent title clipping
+  return Math.min(800, Math.max(280, longestLine(label) * BOLD_CHAR_W + 90));
 }
 
 function edgeLabelSize(label: string): { w: number; h: number } {
@@ -305,7 +306,8 @@ function edgeLabelSize(label: string): { w: number; h: number } {
 function nodeSize(node: GraphNode, archetype: string): { w: number; h: number } {
   const longest = longestLine(node.label);
   if (node.isContainer) {
-    const w = Math.min(540, Math.max(300, longest * BOLD_CHAR_W + 56));
+    // Increased max cap to 800 and padding buffer to 90
+    const w = Math.min(800, Math.max(300, longest * BOLD_CHAR_W + 90));
     return { w, h: Math.max(110, wrappedLines(node.label, w, BOLD_CHAR_W) * LINE_H + 58) };
   }
   if (archetype === 'CONTEXT') {
@@ -886,118 +888,6 @@ function createEdge(
   return createLine(page, source, target, edge, links, archetype, edgeIndex, issues);
 }
 
-interface Pt { x: number; y: number; }
-interface Route { points: Pt[]; label: Box | null; }
-
-// ELK routes in root coordinates (elk.json.edgeCoords ROOT), keyed by edge id.
-function collectRoutes(elkNode: any, out = new Map<string, Route>()): Map<string, Route> {
-  for (const e of elkNode.edges || []) {
-    const points: Pt[] = [];
-    for (const s of e.sections || []) {
-      points.push(s.startPoint, ...(s.bendPoints || []), s.endPoint);
-    }
-    const l = (e.labels || [])[0];
-    const label = l && typeof l.x === 'number' ? { x: l.x, y: l.y, w: l.width || 0, h: l.height || 0 } : null;
-    if (points.length >= 2) out.set(e.id, { points, label });
-  }
-  for (const child of elkNode.children || []) collectRoutes(child, out);
-  return out;
-}
-
-// Drops repeated points and middle points of straight runs, so each segment is one real turn.
-function simplifyRoute(points: Pt[]): Pt[] {
-  const out: Pt[] = [];
-  for (const p of points) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(last.x - p.x) < 0.5 && Math.abs(last.y - p.y) < 0.5) continue;
-    if (out.length >= 2) {
-      const prev = out[out.length - 2];
-      const collinear = Math.abs((last.x - prev.x) * (p.y - prev.y) - (last.y - prev.y) * (p.x - prev.x)) < 0.5;
-      if (collinear) out.pop();
-    }
-    out.push(p);
-  }
-  return out;
-}
-
-function linkAt(box: Box, p: Pt): Pt {
-  const clamp = (v: number) => Math.max(0, Math.min(1, v));
-  return { x: clamp((p.x - box.x) / box.w), y: clamp((p.y - box.y) / box.h) };
-}
-
-// Draws the obstacle-free ELK route as straight segments, since the SDK cannot set line waypoints
-// and Lucid's own elbow routing ignores the other blocks.
-function drawRoute(
-  page: PageProxy,
-  source: BlockProxy,
-  target: BlockProxy,
-  a: Box,
-  b: Box,
-  edge: GraphEdge,
-  route: Route,
-  issues: string[]
-): boolean {
-  const pts = simplifyRoute(route.points.map(p => ({ x: p.x + DIAGRAM_X, y: p.y + CANVAS_MARGIN })));
-  if (pts.length < 2) return false;
-  const last = pts.length - 2;
-  const lines: any[] = [];
-  try {
-    for (let i = 0; i <= last; i++) {
-      const from = pts[i];
-      const to = pts[i + 1];
-      const startStyle = i === 0 && edge.bidirectional ? { style: 'Arrow' } : {};
-      const endStyle = i === last ? { style: 'Arrow' } : {};
-      const endpoint1: any = i === 0
-        ? { connection: source, linkX: linkAt(a, from).x, linkY: linkAt(a, from).y, autoLink: false, ...startStyle }
-        : { x: from.x, y: from.y };
-      const endpoint2: any = i === last
-        ? { connection: target, linkX: linkAt(b, to).x, linkY: linkAt(b, to).y, autoLink: false, ...endStyle }
-        : { x: to.x, y: to.y };
-      const line: any = page.addLine({ endpoint1, endpoint2 });
-      trySet('line shape', () => line.setShape('diagonal'));
-      lines.push(line);
-    }
-  } catch (err) {
-    lines.forEach(l => trySet('remove partial route', () => l.delete()));
-    return false;
-  }
-
-  if (edge.label) {
-    // Put the label on the segment nearest ELK's reserved label slot; else the longest segment.
-    let best = 0;
-    let bestT = 0.5;
-    let bestScore = Infinity;
-    const centre = route.label
-      ? { x: route.label.x + route.label.w / 2 + DIAGRAM_X, y: route.label.y + route.label.h / 2 + CANVAS_MARGIN }
-      : null;
-    for (let i = 0; i <= last; i++) {
-      const p = pts[i];
-      const q = pts[i + 1];
-      const len = Math.hypot(q.x - p.x, q.y - p.y);
-      if (centre && len > 0) {
-        const t = Math.max(0, Math.min(1, ((centre.x - p.x) * (q.x - p.x) + (centre.y - p.y) * (q.y - p.y)) / (len * len)));
-        const d = Math.hypot(p.x + t * (q.x - p.x) - centre.x, p.y + t * (q.y - p.y) - centre.y);
-        if (d < bestScore) { bestScore = d; best = i; bestT = t; }
-      } else if (!centre && -len < bestScore) {
-        bestScore = -len; best = i; bestT = 0.5;
-      }
-    }
-    if (centre && bestScore > 40) {
-      // ELK's slot is off the route; fall back to the longest segment midpoint.
-      let longest = 0;
-      for (let i = 0; i <= last; i++) {
-        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-        if (len > longest) { longest = len; best = i; }
-      }
-      bestT = 0.5;
-    }
-    if (!setLineLabel(lines[best], edge.label, Math.max(0.1, Math.min(0.9, bestT)))) {
-      issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
-    }
-  }
-  return true;
-}
-
 function gridLayout(diagram: Diagram): any {
   const cols = Math.max(1, Math.ceil(Math.sqrt(diagram.nodes.length)));
   return {
@@ -1426,8 +1316,6 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
   }
 
   const currentEdgeIndex = new Map<string, number>();
-  // Context slides keep straight core-to-capability lines; columns are also stretched after ELK, so its routes are stale.
-  const routes = mode === 'grid' || diagram.archetype === 'CONTEXT' ? new Map<string, Route>() : collectRoutes(layout);
 
   await stage(tag, 'create-lines', () => {
     for (const edge of diagram.edges) {
@@ -1448,10 +1336,9 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
       currentEdgeIndex.set(edge.targetId, tIndex + 1);
 
       if (source && target && a && b) {
-        const route = routes.get(edge.id);
-        if (!route || !drawRoute(page, source, target, canvasBox(a), canvasBox(b), edge, route, issues)) {
-          createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
-        }
+        // BYPASS: We no longer call drawRoute(..., route). 
+        // We force createEdge so Lucidchart generates a single, native, malleable line.
+        createEdge(page, source, target, edge, a, b, edgeIndex, maxEdges, diagram.archetype, issues);
       }
     }
   });
