@@ -80,6 +80,42 @@ function doGet(e) {
   );
 }
 
+function omitRetiringSlide9Nodes(payload) {
+  const root = payload && payload.csa_lucidchart_payload ? payload.csa_lucidchart_payload : payload;
+  if (!root || !Array.isArray(root.diagrams)) return payload;
+
+  const normalizeRef = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  root.diagrams.forEach(diagram => {
+    if (Number(diagram.slide_number) !== 9 || !Array.isArray(diagram.nodes)) return;
+
+    const retiringNodes = diagram.nodes.filter(node =>
+      String(node.delta_flag || node.deltaFlag || '').trim().toLowerCase() === 'retiring'
+    );
+    if (retiringNodes.length === 0) return;
+
+    const retiringRefs = new Set();
+    retiringNodes.forEach(node => {
+      [node.id, node.label, node.name].forEach(ref => {
+        const normalized = normalizeRef(ref);
+        if (normalized) retiringRefs.add(normalized);
+      });
+    });
+
+    const referencesRetiringNode = (diagram.connectors || []).some(connector =>
+      retiringRefs.has(normalizeRef(connector.source)) ||
+      retiringRefs.has(normalizeRef(connector.target))
+    );
+    if (referencesRetiringNode) {
+      throw new Error('Slide 9 connector references a retiring node. Remove the connector or update its endpoint before generating the Target State diagram.');
+    }
+
+    diagram.nodes = diagram.nodes.filter(node =>
+      String(node.delta_flag || node.deltaFlag || '').trim().toLowerCase() !== 'retiring'
+    );
+  });
+
+  return payload;
+}
 
 function pushPayloadToLucid(architectureData) {
   const token = PropertiesService.getUserProperties().getProperty('LUCID_ACCESS_TOKEN');
@@ -88,7 +124,9 @@ function pushPayloadToLucid(architectureData) {
   const packageId = PropertiesService.getScriptProperties().getProperty('LUCID_PACKAGE_ID');
   if (!packageId) throw new Error('Script property LUCID_PACKAGE_ID is not set.');
 
-  const bootstrap = buildBootstrapPayload(architectureData);
+  // Preserve connector descriptions; normalization handles label wrapping.
+  const preparedData = omitRetiringSlide9Nodes(architectureData);
+  const bootstrap = buildBootstrapPayload(preparedData);
 
   const documentJson = {
     "version": 1,

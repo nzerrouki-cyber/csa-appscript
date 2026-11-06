@@ -169,8 +169,8 @@ function normalizeDiagram(diagram, index, errors) {
     };
   }
 
-  // Hardened Edge Grouping Logic
-  const edgeGroups = new Map();
+  const edges = [];
+  const seenConnectors = new Set();
   
   (diagram.connectors || []).forEach((c, i) => {
     const sourceId = resolveRef(c.source);
@@ -189,52 +189,23 @@ function normalizeDiagram(diagram, index, errors) {
     }
     const hasStep = Number.isFinite(stepNum);
     const isInstanceEdge = c.type === 'instance' || /^\s*instance\s*$/i.test(String(c.label || ''));
-    
-    // Create an immutable pair key that ignores directionality where applicable
-    let pairKey;
-    if (archetype === 'INFO_FLOW') {
-      pairKey = `infoflow::${sourceId}::${targetId}::${hasStep ? stepNum : i}`;
-    } else if (isInstanceEdge) {
-      pairKey = `instance::${sourceId}::${targetId}`;
-    } else {
-      const sortedPair = [sourceId, targetId].sort();
-      pairKey = `runtime::${sortedPair[0]}::${sortedPair[1]}`;
-    }
-    
-    if (!edgeGroups.has(pairKey)) {
-      edgeGroups.set(pairKey, {
-        id: c.id || (sourceId + '__' + targetId),
-        sourceId: sourceId,
-        targetId: targetId,
-        labels: [],
-        bidirectional: false,
-        type: isInstanceEdge ? 'instance' : (c.type || 'directed'),
-        stepNumbers: []
-      });
-    }
-    
-    const group = edgeGroups.get(pairKey);
-    
-    // Automatically flag bidirectional if traffic flows both ways or is explicitly set
-    if (group.sourceId !== sourceId || c.bidirectional === true || c.type === 'bidirectional') {
-      group.bidirectional = true;
-    }
+    const label = c.label ? wrapLabel(c.label, 25) : '';
+    const bidirectional = c.bidirectional === true || c.type === 'bidirectional';
+    const type = isInstanceEdge ? 'instance' : (c.type || 'directed');
+    const dedupeKey = JSON.stringify([sourceId, targetId, label, type, bidirectional, hasStep ? stepNum : null]);
+    if (seenConnectors.has(dedupeKey)) return;
+    seenConnectors.add(dedupeKey);
 
-    if (c.label) {
-      const wrapped = wrapLabel(c.label, 25);
-      // Only push the label if it's not an exact duplicate
-      if (!group.labels.includes(wrapped)) {
-        group.labels.push(wrapped);
-      }
-    }
-    if (hasStep) group.stepNumbers.push(stepNum);
+    edges.push({
+      id: c.id || (sourceId + '__' + targetId + '__' + i),
+      sourceId: sourceId,
+      targetId: targetId,
+      label: label,
+      bidirectional: bidirectional,
+      type: type,
+      stepNumbers: hasStep ? [stepNum] : []
+    });
   });
-
-  const edges = Array.from(edgeGroups.values()).map(g => ({
-    ...g,
-    // Collapse all distinct interactions into a single malleable arrow with a combined label
-    label: g.labels.join('\n---\n') 
-  }));
 
   if (archetype === 'INFO_FLOW') {
     edges.sort((a, b) => (a.stepNumbers[0] || 0) - (b.stepNumbers[0] || 0));

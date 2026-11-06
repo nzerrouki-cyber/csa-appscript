@@ -567,6 +567,39 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
 
 interface PlacedLabel { edgeId: string; text: string; x: number; y: number; w: number; h: number; }
 
+function edgeLabelLocation(edgePath?: EdgePath, placedLabel?: PlacedLabel): number {
+  const points = edgePath?.points || [];
+  if (!placedLabel || points.length < 2) return 0.5;
+
+  const labelCenter = { x: placedLabel.x + placedLabel.w / 2, y: placedLabel.y + placedLabel.h / 2 };
+  let totalLength = 0;
+  let closestDistance = Infinity;
+  let closestDistanceAlongPath = 0;
+
+  for (let i = 1; i < points.length; i++) {
+    const start = points[i - 1];
+    const end = points[i];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const segmentLength = Math.hypot(dx, dy);
+    if (segmentLength === 0) continue;
+
+    const projection = Math.max(0, Math.min(1, ((labelCenter.x - start.x) * dx + (labelCenter.y - start.y) * dy) / (segmentLength * segmentLength)));
+    const projectedX = start.x + projection * dx;
+    const projectedY = start.y + projection * dy;
+    const distance = Math.hypot(labelCenter.x - projectedX, labelCenter.y - projectedY);
+
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestDistanceAlongPath = totalLength + projection * segmentLength;
+    }
+
+    totalLength += segmentLength;
+  }
+
+  return totalLength > 0 ? closestDistanceAlongPath / totalLength : 0.5;
+}
+
 function flattenEdges(elkNode: any, offsetX: number, offsetY: number, out: PlacedLabel[]): void {
   for (const edge of elkNode.edges || []) {
     for (const label of edge.labels || []) {
@@ -847,7 +880,6 @@ function createLine(
   edge: GraphEdge,
   links: EdgePort,
   archetype: string,
-  edgeIndex: number,
   issues: string[],
   edgePath?: EdgePath,
   placedLabel?: PlacedLabel
@@ -917,29 +949,8 @@ function createLine(
     }
   });
 
-  // Extract ELK Safe Zone Label Placement
-  if (placedLabel && edge.label) {
-    try {
-      const box = {
-        x: placedLabel.x + DIAGRAM_X,
-        y: placedLabel.y + CANVAS_MARGIN,
-        w: placedLabel.w,
-        h: placedLabel.h
-      };
-      const textBlock = page.addBlock({ className: FALLBACK_CLASS, boundingBox: box });
-      setLabel(textBlock, edge.label);
-      
-      // Force it to float without a visible background or border
-      textBlock.properties.set('FillColor', TRANSPARENT);
-      textBlock.properties.set('LineColor', TRANSPARENT);
-      textBlock.properties.set('LineWidth', 0);
-    } catch (err) {
-      issues.push('Could not draw floating label for "' + edge.label.split('\n')[0] + '".');
-    }
-  } else if (edge.label) {
-    // Fallback if ELK didn't generate label coordinates
-    const locationOffset = 0.35 + (edgeIndex % 3) * 0.15;
-    if (!setLineLabel(line, edge.label, locationOffset)) {
+  if (edge.label) {
+    if (!setLineLabel(line, edge.label, edgeLabelLocation(edgePath, placedLabel))) {
       issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
     }
   }
@@ -972,13 +983,12 @@ function createEdge(
   tPortIndex: number,
   tPortCount: number,
   archetype: string,
-  globalEdgeIndex: number,
   issues: string[],
   edgePath?: EdgePath,
   placedLabel?: PlacedLabel
 ): boolean {
   const links = getDistributedPorts(a, b, sPortIndex, sPortCount, tPortIndex, tPortCount, archetype);
-  return createLine(page, source, target, edge, links, archetype, globalEdgeIndex, issues, edgePath, placedLabel);
+  return createLine(page, source, target, edge, links, archetype, issues, edgePath, placedLabel);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -996,22 +1006,8 @@ function shortError(err: unknown): string {
   return first.length > 300 ? first.substring(0, 300) + '...' : first;
 }
 
-function listSome(items: string[], max = 3): string {
-  return items.slice(0, max).join('; ') + (items.length > max ? '; ... (' + (items.length - max) + ' more)' : '');
-}
-
 const KNOWN_CONTAINER_KINDS = ['system', 'enterprise_system', 'capability', 'business_capability', 'macro_env', 'macro_environment', 'location', 'host', 'perimeter'];
 const DELTA_VALUES = ['neutral', 'adding', 'changing', 'retiring'];
-
-function stepsOf(edge: GraphEdge): number[] {
-  if (Array.isArray(edge.stepNumbers) && edge.stepNumbers.length > 0) return edge.stepNumbers;
-  const found: number[] = [];
-  String(edge.label || '').split('\n').forEach(l => {
-    const m = /^\s*step\s+(\d+)/i.exec(l);
-    if (m) found.push(Number(m[1]));
-  });
-  return found;
-}
 
 function checkStandards(diagram: Diagram): string[] {
   const out: string[] = [];
@@ -1124,45 +1120,6 @@ function checkStandards(diagram: Diagram): string[] {
       if (!n.isContainer && n.isSoR && kindOf(n.parentId) !== 'host') out.push('System of Record "' + firstLine(n) + '" should be nested inside a HOST container.');
       if (!n.isContainer && !degree.get(n.id)) out.push('"' + firstLine(n) + '" is not part of any step.');
     }
-    const unnumbered: string[] = [];
-    const mislabeled: string[] = [];
-    const firsts: number[] = [];
-    const all: number[] = [];
-    for (const e of diagram.edges) {
-      const nums = stepsOf(e);
-      if (nums.length === 0) {
-        unnumbered.push(edgeName(e));
-        continue;
-      }
-      firsts.push(nums[0]);
-      nums.forEach(num => {
-        all.push(num);
-        if (!new RegExp('\\bstep\\s+' + num + '\\b', 'i').test(e.label || '')) mislabeled.push(edgeName(e) + ' (step ' + num + ')');
-      });
-    }
-    if (unnumbered.length > 0) out.push(unnumbered.length + ' connector(s) have no stepNumber: ' + listSome(unnumbered) + '.');
-    if (mislabeled.length > 0) out.push('Connector label does not include its "Step N": ' + listSome(mislabeled) + '.');
-    const sorted = all.slice().sort((x, y) => x - y);
-    const dups = sorted.filter((n, i) => i > 0 && n === sorted[i - 1]);
-    if (dups.length > 0) out.push('Duplicate step number(s): ' + Array.from(new Set(dups)).join(', ') + '.');
-    if (firsts.some((n, i) => i > 0 && n < firsts[i - 1])) out.push('Steps are not in ascending order in the connectors array: ' + firsts.join(', ') + '.');
-    const gaps: number[] = [];
-    for (let i = 1; i <= (sorted[sorted.length - 1] || 0); i++) if (sorted.indexOf(i) < 0) gaps.push(i);
-    if (gaps.length > 0) out.push('Step numbering has gaps; missing step(s) ' + gaps.join(', ') + '.');
-
-    const edgesByStep = new Map<number, GraphEdge>();
-    for (const e of diagram.edges) {
-      const nums = stepsOf(e);
-      if (nums.length > 0 && !edgesByStep.has(nums[0])) edgesByStep.set(nums[0], e);
-    }
-    for (let s = 1; s < edgesByStep.size; s++) {
-      const cur = edgesByStep.get(s);
-      const next = edgesByStep.get(s + 1);
-      // Strictly enforce sequential transaction cascade without parallel forks
-      if (cur && next && cur.targetId !== next.sourceId) {
-        out.push('Information Flow break between Step ' + s + ' and Step ' + (s + 1) + ': "' + nameOf(cur.targetId) + '" does not connect to "' + nameOf(next.sourceId) + '". Parallel forks are prohibited.');
-      }
-    }
   } else if (a === 'CONTEXT') {
     for (const n of diagram.nodes) {
       if (!n.isContainer) continue;
@@ -1172,23 +1129,10 @@ function checkStandards(diagram: Diagram): string[] {
         out.push('Capability container "' + firstLine(n) + '" contains ' + childCount.get(n.id) + ' tools; slide 6 density limit is max 2 tools per container.');
       }
     }
-    const flagged = tools.filter(n => n.isCore === true);
-    const cores = flagged.length > 0 ? flagged : tools.filter(n => !n.parentId);
-    const coreIds = new Set(cores.map(n => n.id));
+    const cores = tools.filter(n => n.isCore === true);
     if (cores.length === 0) out.push('System Context has no central core tool (isCore true, parent_container null).');
     for (const n of cores) {
       if (n.parentId) out.push('Core tool "' + firstLine(n) + '" must sit at the root canvas, not inside "' + nameOf(n.parentId) + '".');
-    }
-    for (const n of tools) {
-      if (!coreIds.has(n.id) && !n.parentId) out.push('Peripheral tool "' + firstLine(n) + '" should be inside a capability container.');
-    }
-
-    for (const e of diagram.edges) {
-      const isSrcCore = coreIds.has(e.sourceId);
-      const isTgtCore = coreIds.has(e.targetId);
-      if (!isSrcCore && !isTgtCore) {
-        out.push('Connector ' + edgeName(e) + ' bypasses the central core tool; slide 6 flows must interface with the central core.');
-      }
     }
   }
   return out;
@@ -1439,7 +1383,6 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
     }
 
     const drawnEdges = new Set<string>();
-    let globalEdgeIndex = 0;
 
     for (const edge of diagram.edges) {
       if (drawnEdges.has(edge.id)) continue;
@@ -1472,7 +1415,6 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
           tPortIndex,
           tPortCount,
           diagram.archetype,
-          globalEdgeIndex++,
           issues,
           pathsByEdgeId.get(edge.id),
           labelsByEdgeId.get(edge.id)
