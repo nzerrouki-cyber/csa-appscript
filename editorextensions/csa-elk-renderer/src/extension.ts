@@ -174,7 +174,7 @@ const KEY: { [role: string]: Swatch } = {
   host: { fill: '#EAF2FF', line: '#6FA8F5', legend: 'Host' },
   perimeter: { fill: '#FFFFFF', line: '#9CA3AF', legend: 'External Boundary' },
   unknown: { fill: '#FFFFFF', line: '#D0021B', legend: 'Unknown Type' }
-};
+}
 
 const RED = '#D0021B';
 const RETIRING_LINE = '#9CA3AF';
@@ -339,11 +339,16 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
     'elk.edgeLabels.inline': 'true',
     'elk.edgeLabels.placement': 'CENTER',
     'elk.spacing.nodeNode': '80',
-    'elk.spacing.edgeNode': '65',
-    'elk.spacing.edgeEdge': '45',
-    'elk.spacing.edgeLabel': '10',
-    'elk.layered.spacing.edgeNodeBetweenLayers': '50',
-    'elk.layered.spacing.edgeEdgeBetweenLayers': '35',
+    
+    // Widened base corridors to prevent bus trunking
+    'elk.spacing.edgeNode': '90', 
+    'elk.spacing.edgeEdge': '100', 
+    'elk.spacing.edgeLabel': '24', 
+    
+    // Widened vertical routing channels
+    'elk.layered.spacing.edgeNodeBetweenLayers': '80',
+    'elk.layered.spacing.edgeEdgeBetweenLayers': '90', 
+    
     'elk.layered.spacing.nodeNodeBetweenLayers': '180',
     'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
     'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES'
@@ -357,10 +362,10 @@ function rootLayoutOptions(diagram: Diagram): { [key: string]: string } {
   }
 
   if (diagram.archetype === 'DECOMPOSITION') {
-    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '200';
-    options['elk.spacing.nodeNode'] = '85';
-    options['elk.spacing.edgeNode'] = '65';
-    options['elk.spacing.edgeEdge'] = '45';
+    options['elk.layered.spacing.nodeNodeBetweenLayers'] = '240';
+    options['elk.spacing.nodeNode'] = '100';
+    options['elk.spacing.edgeNode'] = '90';
+    options['elk.spacing.edgeEdge'] = '100';
   }
 
   if (diagram.archetype === 'INFO_FLOW') {
@@ -557,6 +562,49 @@ function flattenLayout(elkNode: any, offsetX: number, offsetY: number, nodeById:
       out.push({ node, x, y, w: child.width || 160, h: child.height || 100 });
     }
     flattenLayout(child, x, y, nodeById, out);
+  }
+}
+
+interface PlacedLabel { edgeId: string; text: string; x: number; y: number; w: number; h: number; }
+
+function flattenEdges(elkNode: any, offsetX: number, offsetY: number, out: PlacedLabel[]): void {
+  for (const edge of elkNode.edges || []) {
+    for (const label of edge.labels || []) {
+      out.push({
+        edgeId: edge.id,
+        text: label.text,
+        x: offsetX + (label.x || 0),
+        y: offsetY + (label.y || 0),
+        w: label.width || 120,
+        h: label.height || 40
+      });
+    }
+  }
+  for (const child of elkNode.children || []) {
+    flattenEdges(child, offsetX + (child.x || 0), offsetY + (child.y || 0), out);
+  }
+}
+
+interface EdgePath {
+  id: string;
+  points: { x: number; y: number }[];
+}
+
+function extractEdgePaths(elkNode: any, offsetX: number, offsetY: number, out: EdgePath[]): void {
+  for (const edge of elkNode.edges || []) {
+    const points: { x: number; y: number }[] = [];
+    for (const section of edge.sections || []) {
+      if (section.startPoint) points.push({ x: offsetX + section.startPoint.x, y: offsetY + section.startPoint.y });
+      for (const bp of section.bendPoints || []) {
+        points.push({ x: offsetX + bp.x, y: offsetY + bp.y });
+      }
+      if (section.endPoint) points.push({ x: offsetX + section.endPoint.x, y: offsetY + section.endPoint.y });
+    }
+    if (points.length > 0) out.push({ id: edge.id, points });
+  }
+  
+  for (const child of elkNode.children || []) {
+    extractEdgePaths(child, offsetX + (child.x || 0), offsetY + (child.y || 0), out);
   }
 }
 
@@ -800,7 +848,9 @@ function createLine(
   links: EdgePort,
   archetype: string,
   edgeIndex: number,
-  issues: string[]
+  issues: string[],
+  edgePath?: EdgePath,
+  placedLabel?: PlacedLabel
 ): boolean {
   const endpoint = (block: BlockProxy, at: { x: number; y: number }, style?: string) => ({
     connection: block,
@@ -834,18 +884,64 @@ function createLine(
   }
   if (!line) return false;
 
-  trySet('line shape', () => {
-    const shapeType = archetype === 'CONTEXT' ? 'diagonal' : 'elbow';
-    if (typeof line.setShape === 'function') {
-      line.setShape(shapeType);
-    } else if (line.properties && typeof line.properties.set === 'function') {
-      line.properties.set('LineShape', shapeType);
+  trySet('line shape and vertices', () => {
+    // If ELK provided an explicit, collision-free path, force Lucidchart to use it
+    if (edgePath && edgePath.points.length > 0) {
+      // 1. Convert ELK relative coordinates to absolute canvas coordinates
+      const absoluteVertices = edgePath.points.map(p => ({
+        x: p.x + DIAGRAM_X,
+        y: p.y + CANVAS_MARGIN
+      }));
+
+      // 2. Set shape to 'polyline' to prevent Lucidchart from applying auto-elbow logic
+      if (typeof line.setShape === 'function') {
+        line.setShape('polyline');
+      } else if (line.properties && typeof line.properties.set === 'function') {
+        line.properties.set('LineShape', 'polyline');
+      }
+
+      // 3. Inject the exact bend points
+      if (typeof line.setVertices === 'function') {
+        line.setVertices(absoluteVertices);
+      } else if (line.properties && typeof line.properties.set === 'function') {
+        line.properties.set('Vertices', absoluteVertices);
+      }
+    } else {
+      // Fallback to standard routing if no explicit path was generated
+      const shapeType = archetype === 'CONTEXT' ? 'diagonal' : 'elbow';
+      if (typeof line.setShape === 'function') {
+        line.setShape(shapeType);
+      } else if (line.properties && typeof line.properties.set === 'function') {
+        line.properties.set('LineShape', shapeType);
+      }
     }
   });
 
-  const locationOffset = 0.35 + (edgeIndex % 3) * 0.15;
-  if (edge.label && !setLineLabel(line, edge.label, locationOffset)) {
-    issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
+  // Extract ELK Safe Zone Label Placement
+  if (placedLabel && edge.label) {
+    try {
+      const box = {
+        x: placedLabel.x + DIAGRAM_X,
+        y: placedLabel.y + CANVAS_MARGIN,
+        w: placedLabel.w,
+        h: placedLabel.h
+      };
+      const textBlock = page.addBlock({ className: FALLBACK_CLASS, boundingBox: box });
+      setLabel(textBlock, edge.label);
+      
+      // Force it to float without a visible background or border
+      textBlock.properties.set('FillColor', TRANSPARENT);
+      textBlock.properties.set('LineColor', TRANSPARENT);
+      textBlock.properties.set('LineWidth', 0);
+    } catch (err) {
+      issues.push('Could not draw floating label for "' + edge.label.split('\n')[0] + '".');
+    }
+  } else if (edge.label) {
+    // Fallback if ELK didn't generate label coordinates
+    const locationOffset = 0.35 + (edgeIndex % 3) * 0.15;
+    if (!setLineLabel(line, edge.label, locationOffset)) {
+      issues.push('Connector label "' + edge.label.split('\n')[0] + '" could not be written.');
+    }
   }
   return true;
 }
@@ -877,10 +973,12 @@ function createEdge(
   tPortCount: number,
   archetype: string,
   globalEdgeIndex: number,
-  issues: string[]
+  issues: string[],
+  edgePath?: EdgePath,
+  placedLabel?: PlacedLabel
 ): boolean {
   const links = getDistributedPorts(a, b, sPortIndex, sPortCount, tPortIndex, tPortCount, archetype);
-  return createLine(page, source, target, edge, links, archetype, globalEdgeIndex, issues);
+  return createLine(page, source, target, edge, links, archetype, globalEdgeIndex, issues, edgePath, placedLabel);
 }
 
 function gridLayout(diagram: Diagram): any {
@@ -1060,8 +1158,9 @@ function checkStandards(diagram: Diagram): string[] {
     for (let s = 1; s < edgesByStep.size; s++) {
       const cur = edgesByStep.get(s);
       const next = edgesByStep.get(s + 1);
-      if (cur && next && cur.targetId !== next.sourceId && cur.sourceId !== next.sourceId) {
-        out.push('Information Flow break between Step ' + s + ' and Step ' + (s + 1) + ': "' + nameOf(cur.targetId) + '" does not connect to "' + nameOf(next.sourceId) + '".');
+      // Strictly enforce sequential transaction cascade without parallel forks
+      if (cur && next && cur.targetId !== next.sourceId) {
+        out.push('Information Flow break between Step ' + s + ' and Step ' + (s + 1) + ': "' + nameOf(cur.targetId) + '" does not connect to "' + nameOf(next.sourceId) + '". Parallel forks are prohibited.');
       }
     }
   } else if (a === 'CONTEXT') {
@@ -1213,8 +1312,17 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
 
   const { layout, failure, mode } = await stage(tag, 'elk-layout', () => computeLayout(diagram, tag));
   if (failure) issues.unshift(failure);
+  
   const placed: Placed[] = [];
   flattenLayout(layout, 0, 0, nodeById, placed);
+
+  const placedLabels: PlacedLabel[] = [];
+  flattenEdges(layout, 0, 0, placedLabels);
+  const labelsByEdgeId = new Map(placedLabels.map(l => [l.edgeId, l]));
+
+  const edgePaths: EdgePath[] = [];
+  extractEdgePaths(layout, 0, 0, edgePaths);
+  const pathsByEdgeId = new Map(edgePaths.map(p => [p.id, p]));
   
   if (mode !== 'grid') {
     issues.push(...checkGeometry(placed, layout));
@@ -1365,7 +1473,9 @@ async function renderDiagram(page: PageProxy, rawDiagram: Diagram): Promise<stri
           tPortCount,
           diagram.archetype,
           globalEdgeIndex++,
-          issues
+          issues,
+          pathsByEdgeId.get(edge.id),
+          labelsByEdgeId.get(edge.id)
         );
       }
     }
